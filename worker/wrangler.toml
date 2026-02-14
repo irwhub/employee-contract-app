@@ -1,0 +1,15 @@
+﻿name = "employee-contract-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[vars]
+SUPABASE_URL = "https://hkfodqvfbxrggrctycbb.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhrZm9kcXZmYnhyZ2dyY3R5Y2JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEwNzA3NDYsImV4cCI6MjA4NjY0Njc0Nn0.Yd7b4-eHpp8MvlWn1NwazuzZU-6FjnyzaWex2G29358"
+GOOGLE_DRIVE_FOLDER_ID = ""
+GOOGLE_SHEET_ID = ""
+GOOGLE_SHEET_TAB_NAME = "Sheet1"
+AUTH_PASSWORD_PEPPER = "local-dev-pepper"
+
+# Secrets (wrangler secret put)
+# SUPABASE_SERVICE_ROLE_KEY
+# GOOGLE_SERVICE_ACCOUNT_JSON

@@ -4,7 +4,7 @@ import { Card } from '../components/Card';
 import { GhostButton, Label, PrimaryButton, TextArea, TextInput } from '../components/FormControls';
 import { supabase, type Contract, type EmployeeProfile } from '../lib/supabase';
 
-const workerBase = import.meta.env.VITE_WORKER_URL;
+const workerBase = '/api';
 
 export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
   const navigate = useNavigate();
@@ -201,3 +201,5 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     </form>
   );
 }
+
+

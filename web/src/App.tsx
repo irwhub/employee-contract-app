@@ -35,46 +35,96 @@ export default function App() {
   const [profile, setProfile] = useState<EmployeeProfile | null>(null);
 
   useEffect(() => {
+    const readFallbackProfile = (userId?: string | null) => {
+      const raw = localStorage.getItem('employee_profile_fallback');
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw) as EmployeeProfile;
+        if (!userId || parsed.auth_user_id === userId) return parsed;
+        return null;
+      } catch {
+        return null;
+      }
+    };
+
+    const watchdog = window.setTimeout(() => {
+      setLoading(false);
+    }, 4000);
+
     if (!isSupabaseConfigured) {
       setLoading(false);
+      window.clearTimeout(watchdog);
       return;
     }
 
     const bootstrap = async () => {
-      const { data } = await supabase.auth.getSession();
-      const userId = data.session?.user.id;
-      if (!userId) {
+      try {
+        const { data, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError) {
+          console.error('getSession error:', sessionError.message);
+          setProfile(readFallbackProfile(null));
+          return;
+        }
+
+        const userId = data.session?.user.id;
+        if (!userId) {
+          setProfile(readFallbackProfile(null));
+          return;
+        }
+
+        const { data: employee, error: employeeError } = await supabase
+          .from('employees')
+          .select('auth_user_id,name,role,dob')
+          .eq('auth_user_id', userId)
+          .single();
+
+        if (employeeError) {
+          console.error('employee fetch error:', employeeError.message);
+          setProfile(readFallbackProfile(userId));
+          return;
+        }
+
+        setProfile(employee as EmployeeProfile | null);
+      } catch (err) {
+        console.error('bootstrap error:', err);
+        setProfile(null);
+      } finally {
         setLoading(false);
-        return;
+        window.clearTimeout(watchdog);
       }
-
-      const { data: employee } = await supabase
-        .from('employees')
-        .select('auth_user_id,name,role,dob')
-        .eq('auth_user_id', userId)
-        .single();
-
-      setProfile(employee as EmployeeProfile | null);
-      setLoading(false);
     };
 
     bootstrap();
 
     const { data: authSub } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      const userId = session?.user.id;
-      if (!userId) {
+      try {
+        const userId = session?.user.id;
+        if (!userId) {
+          setProfile(readFallbackProfile(null));
+          return;
+        }
+
+        const { data: employee, error: employeeError } = await supabase
+          .from('employees')
+          .select('auth_user_id,name,role,dob')
+          .eq('auth_user_id', userId)
+          .single();
+
+        if (employeeError) {
+          console.error('auth change employee fetch error:', employeeError.message);
+          setProfile(readFallbackProfile(userId));
+          return;
+        }
+
+        setProfile(employee as EmployeeProfile | null);
+      } catch (err) {
+        console.error('auth change error:', err);
         setProfile(null);
-        return;
       }
-      const { data: employee } = await supabase
-        .from('employees')
-        .select('auth_user_id,name,role,dob')
-        .eq('auth_user_id', userId)
-        .single();
-      setProfile(employee as EmployeeProfile | null);
     });
 
     return () => {
+      window.clearTimeout(watchdog);
       authSub.subscription.unsubscribe();
     };
   }, []);

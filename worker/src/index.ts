@@ -1,4 +1,4 @@
-﻿import bcrypt from 'bcryptjs';
+import bcrypt from 'bcryptjs';
 
 interface Env {
   SUPABASE_URL: string;
@@ -20,6 +20,17 @@ interface Employee {
   is_active: boolean;
 }
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization'
+};
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
 
 function normalizeDob(input: string): string | null {
   const raw = input.trim();
@@ -46,18 +57,6 @@ function normalizeDob(input: string): string | null {
 
   return `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
 }
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization'
-};
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-  });
 
 const b64url = (input: ArrayBuffer | string) => {
   const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : new Uint8Array(input);
@@ -114,7 +113,7 @@ async function getGoogleAccessToken(env: Env) {
 
   if (!tokenRes.ok) {
     const msg = await tokenRes.text();
-    throw new Error(`Google token 諛쒓툒 ?ㅽ뙣: ${msg}`);
+    throw new Error(`Google token issue failed: ${msg}`);
   }
 
   const tokenJson = (await tokenRes.json()) as { access_token: string };
@@ -130,7 +129,7 @@ async function getUserFromAccessToken(env: Env, accessToken: string) {
   });
 
   if (!res.ok) {
-    throw new Error('?좏슚?섏? ?딆? ?좏겙?낅땲??');
+    throw new Error('Invalid access token.');
   }
 
   return (await res.json()) as { id: string; email?: string };
@@ -146,12 +145,14 @@ async function getEmployeeByAuthUserId(env: Env, authUserId: string) {
       }
     }
   );
+
   const rows = (await res.json()) as Array<{
     auth_user_id: string;
     name: string;
     role: 'admin' | 'staff';
     is_active: boolean;
   }>;
+
   return rows[0];
 }
 
@@ -187,18 +188,38 @@ async function handleLogin(req: Request, env: Env) {
   );
 
   if (!employeeRes.ok) {
-    return json({ error: 'employee lookup failed.' }, 500);
+    const detail = await employeeRes.text();
+    if (detail.includes('PGRST205')) {
+      return json(
+        {
+          error:
+            "employee lookup failed: table public.employees not found. Run supabase/schema.sql on the same project URL configured in worker."
+        },
+        500
+      );
+    }
+    return json(
+      {
+        error: `employee lookup failed: status=${employeeRes.status}, detail=${detail}`
+      },
+      500
+    );
   }
 
   const list = (await employeeRes.json()) as Employee[];
   const employee = list[0];
   if (!employee) {
-    return json({ error: 'employee not found.' }, 401);
+    return json(
+      {
+        error: `employee not found. input(name=${body.name}, dob=${normalizedDob})`
+      },
+      400
+    );
   }
 
   const pinOk = await bcrypt.compare(body.pin, employee.pin_hash);
   if (!pinOk) {
-    return json({ error: 'invalid PIN.' }, 401);
+    return json({ error: 'invalid PIN.' }, 400);
   }
 
   const internalEmail = `${employee.auth_user_id}@internal.local`;
@@ -263,7 +284,7 @@ async function appendToSheet(env: Env, googleToken: string, row: string[]) {
   );
 
   if (!res.ok) {
-    throw new Error(`Sheet append ?ㅽ뙣: ${await res.text()}`);
+    throw new Error(`Sheet append failed: ${await res.text()}`);
   }
 
   const payload = (await res.json()) as {
@@ -303,7 +324,7 @@ async function createDriveFile(env: Env, googleToken: string, filename: string, 
   );
 
   if (!res.ok) {
-    throw new Error(`Drive ?뚯씪 ?앹꽦 ?ㅽ뙣: ${await res.text()}`);
+    throw new Error(`Drive file create failed: ${await res.text()}`);
   }
 
   const payload = (await res.json()) as { id: string; webViewLink?: string };
@@ -311,21 +332,34 @@ async function createDriveFile(env: Env, googleToken: string, filename: string, 
 }
 
 async function handleGoogleSync(req: Request, env: Env) {
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) {
+    return json({ error: 'worker config missing: SUPABASE_SERVICE_ROLE_KEY' }, 500);
+  }
+  if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || !env.GOOGLE_DRIVE_FOLDER_ID || !env.GOOGLE_SHEET_ID) {
+    return json(
+      {
+        error:
+          'worker config missing: GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_DRIVE_FOLDER_ID / GOOGLE_SHEET_ID'
+      },
+      500
+    );
+  }
+
   const authHeader = req.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
-    return json({ error: 'Authorization Bearer ?좏겙???꾩슂?⑸땲??' }, 401);
+    return json({ error: 'Authorization Bearer token is required.' }, 401);
   }
 
   const token = authHeader.replace('Bearer ', '');
   const user = await getUserFromAccessToken(env, token);
   const employee = await getEmployeeByAuthUserId(env, user.id);
   if (!employee || !employee.is_active) {
-    return json({ error: '吏곸썝 沅뚰븳???녾굅??鍮꾪솢?깊솕?섏뿀?듬땲??' }, 403);
+    return json({ error: 'inactive employee or no permission.' }, 403);
   }
 
   const body = (await req.json()) as { contract_id?: string };
   if (!body.contract_id) {
-    return json({ error: 'contract_id媛 ?꾩슂?⑸땲??' }, 400);
+    return json({ error: 'contract_id is required.' }, 400);
   }
 
   const contractRes = await fetch(
@@ -341,13 +375,13 @@ async function handleGoogleSync(req: Request, env: Env) {
   const contracts = (await contractRes.json()) as Array<Record<string, unknown>>;
   const contract = contracts[0];
   if (!contract) {
-    return json({ error: '怨꾩빟??李얠쓣 ???놁뒿?덈떎.' }, 404);
+    return json({ error: 'contract not found.' }, 404);
   }
 
   const isOwner = contract.created_by === user.id;
   const isAdmin = employee.role === 'admin';
   if (!isOwner && !isAdmin) {
-    return json({ error: '蹂몄씤 怨꾩빟?쒕쭔 ?숆린??媛?ν빀?덈떎.' }, 403);
+    return json({ error: 'only owner or admin can sync this contract.' }, 403);
   }
 
   const googleToken = await getGoogleAccessToken(env);
@@ -427,9 +461,8 @@ export default {
 
       return json({ error: 'Not Found' }, 404);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '?????녿뒗 ?ㅻ쪟';
+      const message = error instanceof Error ? error.message : 'unknown error';
       return json({ error: message }, 500);
     }
   }
 };
-

@@ -3,7 +3,8 @@ import { Card } from '../components/Card';
 import { Label, PrimaryButton, TextInput } from '../components/FormControls';
 import { supabase } from '../lib/supabase';
 
-const workerBase = import.meta.env.VITE_WORKER_URL;
+const workerBase = '/api';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 
 interface LoginPageProps {
   onLoginDone: () => void;
@@ -16,34 +17,93 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const persistSessionFallback = (session: { access_token: string; refresh_token: string }) => {
+    if (!supabaseUrl) return false;
+    try {
+      const host = new URL(supabaseUrl).hostname;
+      const projectRef = host.split('.')[0];
+      const storageKey = `sb-${projectRef}-auth-token`;
+      localStorage.setItem(storageKey, JSON.stringify(session));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
 
     try {
-      if (!workerBase) {
-        throw new Error('VITE_WORKER_URL이 설정되지 않았습니다.');
-      }
-      const response = await fetch(`${workerBase}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, dob, pin })
-      });
+      const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: number) => {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          return await fetch(url, { ...init, signal: controller.signal });
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      };
 
-      const payload = await response.json();
+      const response = await fetchWithTimeout(
+        `${workerBase}/auth/login`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, dob, pin })
+        },
+        8000
+      );
+
+      const raw = await response.text();
+      let payload: any = {};
+      try {
+        payload = raw ? JSON.parse(raw) : {};
+      } catch {
+        payload = {};
+      }
       if (!response.ok) {
-        throw new Error(payload.error || '로그인에 실패했습니다.');
+        throw new Error(
+          typeof payload.error === 'string' ? payload.error : '로그인에 실패했습니다.'
+        );
+      }
+
+      if (!payload.session?.access_token || !payload.session?.refresh_token) {
+        throw new Error('로그인 응답이 올바르지 않습니다. worker 응답을 확인해주세요.');
       }
 
       const { access_token, refresh_token } = payload.session;
-      const { error: sessionError } = await supabase.auth.setSession({ access_token, refresh_token });
-      if (sessionError) {
-        throw sessionError;
+      const setSessionWithTimeout = Promise.race([
+        supabase.auth.setSession({ access_token, refresh_token }),
+        new Promise<never>((_, reject) =>
+          window.setTimeout(() => reject(new Error('세션 저장이 지연되고 있습니다.')), 6000)
+        )
+      ]);
+
+      try {
+        const { error: sessionError } = (await setSessionWithTimeout) as Awaited<
+          ReturnType<typeof supabase.auth.setSession>
+        >;
+        if (sessionError) {
+          throw sessionError;
+        }
+      } catch (setSessionError) {
+        const ok = persistSessionFallback({ access_token, refresh_token });
+        if (!ok) {
+          throw setSessionError;
+        }
+      }
+
+      if (payload.profile) {
+        localStorage.setItem('employee_profile_fallback', JSON.stringify(payload.profile));
       }
 
       onLoginDone();
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('로그인 요청이 지연되고 있습니다. 잠시 후 다시 시도해주세요.');
+      } else
       if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
         setError('서버 연결 실패: worker가 실행 중인지 확인해주세요. (http://127.0.0.1:8787)');
       } else {
@@ -101,4 +161,5 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
     </div>
   );
 }
+
 

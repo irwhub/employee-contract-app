@@ -7,6 +7,24 @@ import { supabase, type EmployeeProfile } from '../lib/supabase';
 import { ensureValidAccessToken } from '../lib/session';
 
 const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
+const SYNC_TIMEOUT_MS = 30000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(label));
+      }, ms);
+    })
+  ]);
+}
 const CONTRACT_TYPE_OPTIONS = ['손해사정사', '행정사', '손해사정사+행정사'] as const;
 const RELATION_OPTIONS = ['본인', '배우자', '부모', '자녀', '기타'] as const;
 const DELEGATION_OPTIONS = [
@@ -108,20 +126,38 @@ export function ContractsNewPage({ profile }: { profile: EmployeeProfile }) {
         throw new Error(dbError?.message || '계약 저장 실패');
       }
 
+      let syncError: string | null = null;
       if (workerBase) {
-        const accessToken = await ensureValidAccessToken();
-        const syncRes = await fetch(`${workerBase}/integrations/google/sync`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`
-          },
-          body: JSON.stringify({ contract_id: data.id })
-        });
-        if (!syncRes.ok) {
-          const payload = await syncRes.json().catch(() => ({}));
-          throw new Error(payload.error || 'Google 동기화 실패');
+        try {
+          const accessToken = await withTimeout(
+            ensureValidAccessToken(),
+            10000,
+            '세션 획득이 지연되어 동기화를 건너뜁니다.'
+          );
+
+          const syncRes = await withTimeout(
+            fetch(`${workerBase}/integrations/google/sync`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${accessToken}`
+              },
+              body: JSON.stringify({ contract_id: data.id })
+            }),
+            SYNC_TIMEOUT_MS,
+            'Google 동기화가 지연되어 건너뜁니다.'
+          );
+          if (!syncRes.ok) {
+            const payload = await syncRes.json().catch(() => ({}));
+            syncError = payload.error || 'Google 동기화 실패';
+          }
+        } catch (err) {
+          syncError = err instanceof Error ? err.message : 'Google 동기화 중 오류가 발생했습니다.';
         }
+      }
+
+      if (syncError) {
+        setError(`저장은 완료되었습니다. ${syncError}`);
       }
 
       navigate(`/contracts/${data.id}`);

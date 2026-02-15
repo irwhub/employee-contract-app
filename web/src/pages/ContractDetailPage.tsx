@@ -18,6 +18,23 @@ const DELEGATION_OPTIONS = [
   { key: 'delegation_school_safety', label: '학교안전공제회' },
   { key: 'delegation_other', label: '기타' }
 ] as const;
+const SYNC_TIMEOUT_MS = 30000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(label));
+      }, ms);
+    })
+  ]);
+}
 
 function toUserFriendlyError(error: unknown, fallback = '처리 중 오류가 발생했습니다.') {
   const raw = typeof error === 'string' ? error : JSON.stringify(error || '');
@@ -131,7 +148,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       setSaving(false);
       setIsEditing(false);
       setOriginalContract(contract);
-      setMessage('저장은 완료되었습니다. PDF 자동 생성은 실패했습니다.');
+      setMessage(syncResult.error ? `저장은 완료되었습니다. ${syncResult.error}` : '저장은 완료되었습니다. PDF 자동 생성은 실패했습니다.');
       return;
     }
 
@@ -173,11 +190,21 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         body: JSON.stringify({ contract_id: targetId })
       });
 
-    let res = await callSync(accessToken);
+    let res: Response;
+    try {
+      res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, '동기화 요청이 지연되었습니다.');
+    } catch (err) {
+      if (!options?.suppressUiError) {
+        setError(toUserFriendlyError(err, '동기화 실패'));
+      }
+      setSyncing(false);
+      return { ok: false, error: toUserFriendlyError(err, '동기화 실패') };
+    }
+
     if (res.status === 401) {
       try {
         accessToken = await getAccessTokenOrThrow();
-        res = await callSync(accessToken);
+        res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, '동기화 요청이 지연되었습니다.');
       } catch {
         // handled by res error below
       }
@@ -249,11 +276,19 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         }
       });
 
-    let res = await fetchPdf(accessToken);
+    let res: Response;
+    try {
+      res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF 다운로드가 지연되었습니다.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'PDF 다운로드가 지연되었습니다.');
+      setMessage(null);
+      return;
+    }
+
     if (res.status === 401) {
       try {
         accessToken = await getAccessTokenOrThrow();
-        res = await fetchPdf(accessToken);
+        res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF 다운로드가 지연되었습니다.');
       } catch {
         // handled by response error below
       }

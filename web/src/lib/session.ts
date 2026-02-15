@@ -23,6 +23,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
+async function withSupabaseTimeout<T>(promise: Promise<T>, label: string, ms = 8000): Promise<T> {
+  return withTimeout(promise, ms, label);
+}
+
 function decodeJwtExp(token: string): number | null {
   try {
     const parts = token.split('.');
@@ -164,24 +168,30 @@ export async function refreshWithRefreshToken(refreshToken: string): Promise<Sto
 }
 
 async function ensureSupabaseSession(session: StoredSession): Promise<string | null> {
-  const { data, error } = await supabase.auth.setSession({
-    access_token: session.access_token,
-    refresh_token: session.refresh_token
-  });
+  const { data, error } = await withSupabaseTimeout(
+    supabase.auth.setSession({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token
+    }),
+    '세션 유효성 확인이 지연되었습니다.'
+  );
   if (error) return null;
 
   const usableToken = data.session?.access_token ?? session.access_token;
   if (!usableToken) return null;
 
-  const userResp = await supabase.auth.getUser(usableToken);
+  const userResp = await withSupabaseTimeout(supabase.auth.getUser(usableToken), '사용자 조회가 지연되었습니다.');
   if (userResp.error) return null;
   return usableToken;
 }
 
 export async function ensureValidAccessToken(): Promise<string> {
-  const direct = (await supabase.auth.getSession()).data.session;
+  const direct = (await withSupabaseTimeout(supabase.auth.getSession(), '세션 조회가 지연되었습니다.')).data.session;
   if (direct?.access_token && !isExpiredOrInvalidToken(direct.access_token)) {
-    const userResp = await supabase.auth.getUser(direct.access_token);
+    const userResp = await withSupabaseTimeout(
+      supabase.auth.getUser(direct.access_token),
+      '사용자 조회가 지연되었습니다.'
+    );
     if (!userResp.error && userResp.data.user?.id) {
       return direct.access_token;
     }
@@ -217,7 +227,7 @@ export async function ensureValidAccessToken(): Promise<string> {
     }
   }
 
-  const refreshedSession = await supabase.auth.refreshSession();
+  const refreshedSession = await withSupabaseTimeout(supabase.auth.refreshSession(), '세션 갱신이 지연되었습니다.');
   if (refreshedSession.data.session?.access_token) {
     return refreshedSession.data.session.access_token;
   }

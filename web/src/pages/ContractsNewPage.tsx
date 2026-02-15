@@ -6,7 +6,7 @@ import { SignaturePad } from '../components/SignaturePad';
 import { supabase, type EmployeeProfile } from '../lib/supabase';
 import { ensureValidAccessToken } from '../lib/session';
 
-const workerBase = '/api';
+const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
 const CONTRACT_TYPE_OPTIONS = ['손해사정사', '행정사', '손해사정사+행정사'] as const;
 const RELATION_OPTIONS = ['본인', '배우자', '부모', '자녀', '기타'] as const;
 const DELEGATION_OPTIONS = [

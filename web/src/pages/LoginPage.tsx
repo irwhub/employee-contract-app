@@ -3,7 +3,7 @@ import { Card } from '../components/Card';
 import { Label, PrimaryButton, TextInput } from '../components/FormControls';
 import { setFallbackFromSessionResult } from '../lib/session';
 
-const workerBase = '/api';
+const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
 
 interface LoginPageProps {
   onLoginDone: () => void;
@@ -15,11 +15,15 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
   const [pin, setPin] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const normalizeDobInput = (input: string) => input.replace(/[^\d-]/g, '').slice(0, 10);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanName = name.trim();
+    const cleanDob = dob.trim();
+    const cleanPin = pin.trim();
     setLoading(true);
     setError(null);
 
@@ -39,7 +43,7 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, dob, pin })
+          body: JSON.stringify({ name: cleanName, dob: cleanDob, pin: cleanPin })
         },
         8000
       );
@@ -53,7 +57,11 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
       }
       if (!response.ok) {
         throw new Error(
-          typeof payload.error === 'string' ? payload.error : '로그인에 실패했습니다.'
+          typeof payload.error === 'string'
+            ? payload.error
+            : typeof payload.message === 'string'
+              ? payload.message
+              : raw || '로그인에 실패했습니다.'
         );
       }
 
@@ -67,10 +75,21 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
         expires_at: payload.session.expires_at
       };
 
-      await setFallbackFromSessionResult(session);
+      const { sessionSaved, message } = await setFallbackFromSessionResult(session);
+      if (!sessionSaved) {
+        setNotice(message || '세션 저장이 지연되었습니다. 로컬 동기 모드로 로그인됩니다.');
+      }
 
       if (payload.profile) {
         localStorage.setItem('employee_profile_fallback', JSON.stringify(payload.profile));
+      } else {
+        const fallbackProfile = {
+          auth_user_id: payload.user?.id || '',
+          name: cleanName || '직원',
+          role: 'staff',
+          dob: cleanDob
+        };
+        localStorage.setItem('employee_profile_fallback', JSON.stringify(fallbackProfile));
       }
 
       setLoading(false);
@@ -135,6 +154,7 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
               />
             </div>
             {error && <p className="text-sm text-red-600">{error}</p>}
+            {notice && <p className="text-sm text-amber-700">{notice}</p>}
             <PrimaryButton type="submit" loading={loading}>
               로그인
             </PrimaryButton>

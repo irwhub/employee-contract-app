@@ -28,6 +28,12 @@ interface Employee {
   is_active: boolean;
 }
 
+interface SignatureImage {
+  dataUrl: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
@@ -222,20 +228,23 @@ async function handleLogin(req: Request, env: Env) {
   }
 
   const body = (await req.json()) as { name?: string; dob?: string; pin?: string };
+  const rawName = body.name?.trim() ?? '';
   const normalizedDob = body.dob ? normalizeDob(body.dob) : null;
+  const normalizedPin = body.pin?.trim() ?? '';
 
-  if (!body.name || !body.dob || !body.pin) {
+  if (!rawName || !body.dob || !normalizedPin) {
     return json({ error: 'name, dob, pin is required.' }, 400);
   }
   if (!normalizedDob) {
     return json({ error: 'dob must be YYYY-MM-DD format (or YYYYMMDD).' }, 400);
   }
-  if (!/^\d{4}$/.test(body.pin)) {
+  if (!/^\d{4}$/.test(normalizedPin)) {
     return json({ error: 'PIN must be 4 digits.' }, 400);
   }
 
+  const query = `${env.SUPABASE_URL}/rest/v1/employees?name=eq.${encodeURIComponent(rawName)}&dob=eq.${normalizedDob}&is_active=eq.true&select=auth_user_id,name,role,pin_hash,dob,is_active`;
   const employeeRes = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/employees?name=eq.${encodeURIComponent(body.name)}&dob=eq.${normalizedDob}&is_active=eq.true&select=auth_user_id,name,role,pin_hash,dob,is_active`,
+    query,
     {
       headers: {
         apikey: env.SUPABASE_SERVICE_ROLE_KEY,
@@ -266,6 +275,76 @@ async function handleLogin(req: Request, env: Env) {
   const list = (await employeeRes.json()) as Employee[];
   const employee = list[0];
   if (!employee) {
+    // Fallback: 공백/문자열 오차를 줄이기 위해 대소문자/공백 없는 비교 fallback 시도
+    const fallbackRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/employees?name=ilike.${encodeURIComponent(rawName)}&dob=eq.${normalizedDob}&is_active=eq.true&select=auth_user_id,name,role,pin_hash,dob,is_active`,
+      {
+        headers: {
+          apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`
+        }
+      }
+    );
+
+    if (fallbackRes.ok) {
+      const fallbackList = (await fallbackRes.json()) as Employee[];
+      const fallbackEmployee = fallbackList[0];
+      if (fallbackEmployee) {
+        const pinOk = await bcrypt.compare(normalizedPin, fallbackEmployee.pin_hash);
+        if (!pinOk) {
+          return json({ error: 'invalid PIN.' }, 400);
+        }
+
+        const normalizedEmployee = fallbackEmployee;
+        const internalEmail = `${normalizedEmployee.auth_user_id}@internal.local`;
+        const internalPassword = `PW-${normalizedEmployee.auth_user_id}-${env.AUTH_PASSWORD_PEPPER}`;
+
+        const updateUserRes = await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users/${normalizedEmployee.auth_user_id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`
+          },
+          body: JSON.stringify({
+            email: internalEmail,
+            password: internalPassword,
+            email_confirm: true
+          })
+        });
+
+        if (!updateUserRes.ok) {
+          const msg = await updateUserRes.text();
+          return json({ error: `auth user update failed: ${msg}` }, 500);
+        }
+
+        const tokenRes = await fetch(`${env.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: env.SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({ email: internalEmail, password: internalPassword })
+        });
+
+        if (!tokenRes.ok) {
+          const msg = await tokenRes.text();
+          return json({ error: `session issue failed: ${msg}` }, 500);
+        }
+
+        const session = await tokenRes.json();
+        return json({
+          session,
+          profile: {
+            auth_user_id: normalizedEmployee.auth_user_id,
+            name: normalizedEmployee.name,
+            role: normalizedEmployee.role,
+            dob: normalizedEmployee.dob
+          }
+        });
+      }
+    }
+
     return json(
       {
         error: `employee not found. input(name=${body.name}, dob=${normalizedDob})`
@@ -274,7 +353,7 @@ async function handleLogin(req: Request, env: Env) {
     );
   }
 
-  const pinOk = await bcrypt.compare(body.pin, employee.pin_hash);
+  const pinOk = await bcrypt.compare(normalizedPin, employee.pin_hash);
   if (!pinOk) {
     return json({ error: 'invalid PIN.' }, 400);
   }
@@ -321,7 +400,8 @@ async function handleLogin(req: Request, env: Env) {
     profile: {
       auth_user_id: employee.auth_user_id,
       name: employee.name,
-      role: employee.role
+      role: employee.role,
+      dob: employee.dob
     }
   });
 }
@@ -443,9 +523,222 @@ function getTemplatePlan(env: Env, contractType: string) {
 
 function toText(value: unknown) {
   if (value === null || value === undefined) return '';
-  if (typeof value === 'boolean') return value ? '\uB3D9\uC758' : '\uBBF8\uB3D9\uC758';
   return String(value);
 }
+
+function toCheckbox(value: unknown) {
+  return value === true ? '☑' : '☐';
+}
+
+function parseDataUrl(dataUrl: string): SignatureImage | null {
+  const trimmed = dataUrl.trim();
+  const match = trimmed.match(/^data:([^;,]+);base64,(.+)$/i);
+  if (!match || !match[1] || !match[2]) return null;
+
+  const mimeType = match[1].toLowerCase();
+  if (!mimeType.startsWith('image/')) return null;
+
+  try {
+    const binary = atob(match[2].replace(/\s/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return { dataUrl: trimmed, mimeType, bytes };
+  } catch (_err) {
+    return null;
+  }
+}
+
+function signatureImageExt(mimeType: string) {
+  if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return 'jpg';
+  if (mimeType.includes('gif')) return 'gif';
+  return 'png';
+}
+
+function signatureImageFileName(mimeType: string) {
+  return `signature_${crypto.randomUUID()}.${signatureImageExt(mimeType)}`;
+}
+
+function signatureImagePublicUrl(fileId: string) {
+  return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+}
+
+async function setDriveFilePublic(googleToken: string, fileId: string) {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${googleToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      role: 'reader',
+      type: 'anyone'
+    })
+  });
+
+  if (!res.ok) {
+    const detail = await res.text();
+    const skipped =
+      detail.includes('alreadyExists') ||
+      detail.includes('already shared') ||
+      detail.includes('already has') ||
+      detail.includes('duplicate');
+    if (!skipped) {
+      throw new Error(`Drive public permission failed: ${detail}`);
+    }
+  }
+}
+
+async function uploadSignatureImageToDrive(
+  googleToken: string,
+  parentFolderId: string,
+  filename: string,
+  mimeType: string,
+  bytes: Uint8Array
+) {
+  const boundary = `signature_boundary_${crypto.randomUUID()}`;
+  const meta = {
+    name: filename,
+    parents: [parentFolderId],
+    mimeType
+  };
+
+  const head = new TextEncoder().encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(
+      meta
+    )}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
+  );
+  const tail = new TextEncoder().encode(`\r\n--${boundary}--`);
+  const body = concatBytes([head, bytes, tail]);
+
+  const res = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink&supportsAllDrives=true',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${googleToken}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`
+      },
+      body
+    }
+  );
+
+  if (!res.ok) throw new Error(`Signature image upload failed: ${await res.text()}`);
+  return (await res.json()) as { id: string; webViewLink?: string };
+}
+
+async function getTextPlaceholderRange(
+  googleToken: string,
+  documentId: string,
+  placeholder: string
+) {
+  const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
+    headers: { Authorization: `Bearer ${googleToken}` }
+  });
+  if (!res.ok) throw new Error(`Docs get failed: ${await res.text()}`);
+
+  const doc = (await res.json()) as {
+    body?: {
+      content?: Array<{
+        paragraph?: {
+          elements?: Array<{
+            textRun?: {
+              content: string;
+            };
+            startIndex?: number;
+          }>;
+        };
+      }>;
+    };
+  };
+
+  const token = `{{${placeholder}}}`;
+  for (const section of doc.body?.content || []) {
+    const elements = section.paragraph?.elements || [];
+    for (const el of elements) {
+      const text = el.textRun?.content;
+      if (!text || typeof el.startIndex !== 'number') continue;
+      const offset = text.indexOf(token);
+      if (offset >= 0) {
+        const startIndex = el.startIndex + offset;
+        return { startIndex, endIndex: startIndex + token.length };
+      }
+    }
+  }
+
+  return null;
+}
+
+async function insertSignatureImageToDoc(
+  googleToken: string,
+  documentId: string,
+  signatureDataUrl: string,
+  employeeFolderId: string
+) {
+  const parsed = parseDataUrl(signatureDataUrl);
+  if (!parsed) return;
+
+  const range = await getTextPlaceholderRange(googleToken, documentId, 'signature_image');
+  if (!range) return;
+
+  const imageName = signatureImageFileName(parsed.mimeType);
+  const uploaded = await uploadSignatureImageToDrive(
+    googleToken,
+    employeeFolderId,
+    imageName,
+    parsed.mimeType,
+    parsed.bytes
+  );
+
+  try {
+    await setDriveFilePublic(googleToken, uploaded.id);
+  } catch (_err) {
+    // Keep going in case Docs can fetch non-public links.
+  }
+
+  try {
+    const imageUri = signatureImagePublicUrl(uploaded.id);
+    const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${googleToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            deleteContentRange: {
+              range: {
+                startIndex: range.startIndex,
+                endIndex: range.endIndex
+              }
+            }
+          },
+          {
+            insertInlineImage: {
+              uri: imageUri,
+              location: { index: range.startIndex },
+              objectSize: {
+                width: { magnitude: 160, unit: 'PT' },
+                height: { magnitude: 70, unit: 'PT' }
+              }
+            }
+          }
+        ]
+      })
+    });
+
+    if (!res.ok) throw new Error(`Doc signature insert failed: ${await res.text()}`);
+  } finally {
+    try {
+      await deleteDriveFile(googleToken, uploaded.id);
+    } catch (_err) {
+      // ignore temp file cleanup failure
+    }
+  }
+}
+
 function createPlaceholderMap(contract: Record<string, unknown>) {
   return {
     employee_name: toText(contract.employee_name),
@@ -466,15 +759,15 @@ function createPlaceholderMap(contract: Record<string, unknown>) {
     adjuster_fee_percent: toText(contract.adjuster_fee_percent),
     fee_notes: toText(contract.fee_notes),
     content: toText(contract.content),
-    consent_personal_info: toText(contract.consent_personal_info),
-    consent_required_terms: toText(contract.consent_required_terms),
-    delegation_auto_insurance: toText(contract.delegation_auto_insurance),
-    delegation_personal_insurance: toText(contract.delegation_personal_insurance),
-    delegation_workers_comp: toText(contract.delegation_workers_comp),
-    delegation_disability_pension: toText(contract.delegation_disability_pension),
-    delegation_employer_liability: toText(contract.delegation_employer_liability),
-    delegation_school_safety: toText(contract.delegation_school_safety),
-    delegation_other: toText(contract.delegation_other),
+    consent_personal_info: toCheckbox(contract.consent_personal_info),
+    consent_required_terms: toCheckbox(contract.consent_required_terms),
+    delegation_auto_insurance: toCheckbox(contract.delegation_auto_insurance),
+    delegation_personal_insurance: toCheckbox(contract.delegation_personal_insurance),
+    delegation_workers_comp: toCheckbox(contract.delegation_workers_comp),
+    delegation_disability_pension: toCheckbox(contract.delegation_disability_pension),
+    delegation_employer_liability: toCheckbox(contract.delegation_employer_liability),
+    delegation_school_safety: toCheckbox(contract.delegation_school_safety),
+    delegation_other: toCheckbox(contract.delegation_other),
     delegation_other_text: toText(contract.delegation_other_text),
     now_date: new Date().toISOString().slice(0, 10)
   };
@@ -819,6 +1112,14 @@ async function handleGoogleSync(req: Request, env: Env) {
     );
     try {
       await replacePlaceholdersInDoc(googleToken, docCopy.id, createPlaceholderMap(contract));
+      if (typeof contract.signature_data_url === 'string' && contract.signature_data_url) {
+        await insertSignatureImageToDoc(
+          googleToken,
+          docCopy.id,
+          contract.signature_data_url,
+          employeeFolder.id
+        );
+      }
       const pdfBytes = await exportGoogleDocPdf(googleToken, docCopy.id);
       pdfParts.push({ kind: item.kind, bytes: pdfBytes });
     } finally {

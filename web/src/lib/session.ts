@@ -11,6 +11,18 @@ export interface StoredSession {
   expires_at?: number;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        reject(new Error(label));
+      }, ms);
+      promise.finally(() => globalThis.clearTimeout(timer));
+    })
+  ]);
+}
+
 function decodeJwtExp(token: string): number | null {
   try {
     const parts = token.split('.');
@@ -84,12 +96,30 @@ export function clearAuthState() {
   }
 }
 
-export async function setFallbackFromSessionResult(session: StoredSession) {
-  await supabase.auth.setSession({
-    access_token: session.access_token,
-    refresh_token: session.refresh_token
-  });
+export async function setFallbackFromSessionResult(
+  session: StoredSession
+): Promise<{ sessionSaved: boolean; message?: string }> {
+  try {
+    await withTimeout(
+      supabase.auth.setSession({
+        access_token: session.access_token,
+        refresh_token: session.refresh_token
+      }) as Promise<unknown>,
+      5000,
+      '세션 저장이 지연되었습니다. 잠시 후 다시 시도해주세요.'
+    );
+  } catch (err) {
+    console.warn('setSession timeout or error:', err);
+    await persistFallbackSession(session);
+    const msg = err instanceof Error ? err.message : '세션 저장이 지연되었습니다. 잠시 후 다시 시도해주세요.';
+    return {
+      sessionSaved: false,
+      message: msg
+    };
+  }
+
   await persistFallbackSession(session);
+  return { sessionSaved: true };
 }
 
 export async function refreshWithRefreshToken(refreshToken: string): Promise<StoredSession | null> {

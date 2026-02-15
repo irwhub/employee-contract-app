@@ -46,20 +46,61 @@ export default function App() {
       return;
     }
 
+    const hydrateFromFallbackProfile = (userId?: string): EmployeeProfile | null => {
+      try {
+        const raw = localStorage.getItem('employee_profile_fallback');
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as {
+          auth_user_id?: string;
+          name?: string;
+          role?: string;
+          dob?: string;
+        };
+        if (!parsed.auth_user_id) return null;
+        if (userId && parsed.auth_user_id !== userId) return null;
+        if (!parsed.name || !parsed.role || !parsed.dob) return null;
+        return {
+          auth_user_id: parsed.auth_user_id,
+          name: parsed.name,
+          dob: parsed.dob,
+          role: parsed.role === 'admin' ? 'admin' : 'staff'
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    const immediateFallback = hydrateFromFallbackProfile();
+    if (immediateFallback) {
+      setProfile(immediateFallback);
+      setLoading(false);
+      window.clearTimeout(watchdog);
+    }
+
     const bootstrap = async () => {
       try {
         const { data, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) {
           console.error('getSession error:', sessionError.message);
-          clearAuthState();
-          setProfile(null);
+          const fallback = hydrateFromFallbackProfile();
+          if (fallback) {
+            setProfile(fallback);
+          } else {
+            clearAuthState();
+            setProfile(null);
+          }
           return;
         }
 
-        const userId = data.session?.user.id;
+        const userId = data.session?.user.id ?? '';
         if (!userId) {
-          clearAuthState();
-          setProfile(null);
+          const fallback = hydrateFromFallbackProfile();
+          if (fallback) {
+            setProfile(fallback);
+          } else {
+            clearAuthState();
+            setProfile(null);
+          }
           return;
         }
 
@@ -71,16 +112,26 @@ export default function App() {
 
         if (employeeError) {
           console.error('employee fetch error:', employeeError.message);
-          clearAuthState();
-          setProfile(null);
+          const fallback = hydrateFromFallbackProfile(userId);
+          if (fallback) {
+            setProfile(fallback);
+          } else {
+            clearAuthState();
+            setProfile(null);
+          }
           return;
         }
 
         setProfile(employee as EmployeeProfile | null);
       } catch (err) {
         console.error('bootstrap error:', err);
-        clearAuthState();
-        setProfile(null);
+        const fallback = hydrateFromFallbackProfile();
+        if (fallback) {
+          setProfile(fallback);
+        } else {
+          clearAuthState();
+          setProfile(null);
+        }
       } finally {
         setLoading(false);
         window.clearTimeout(watchdog);
@@ -91,10 +142,15 @@ export default function App() {
 
     const { data: authSub } = supabase.auth.onAuthStateChange(async (_event, session) => {
       try {
-        const userId = session?.user.id;
+        const userId = session?.user.id ?? '';
         if (!userId) {
-          clearAuthState();
-          setProfile(null);
+          const fallback = hydrateFromFallbackProfile();
+          if (fallback) {
+            setProfile(fallback);
+          } else {
+            clearAuthState();
+            setProfile(null);
+          }
           return;
         }
 
@@ -106,8 +162,13 @@ export default function App() {
 
         if (employeeError) {
           console.error('auth change employee fetch error:', employeeError.message);
-          clearAuthState();
-          setProfile(null);
+          const fallback = hydrateFromFallbackProfile(userId);
+          if (fallback) {
+            setProfile(fallback);
+          } else {
+            clearAuthState();
+            setProfile(null);
+          }
           return;
         }
 

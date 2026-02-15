@@ -57,6 +57,17 @@ This keeps `auth.uid()`-based RLS while hiding email input from staff users.
    - `GOOGLE_TEMPLATE_ADMIN_DOC_ID`
    - `GOOGLE_TEMPLATE_COMBINED_DOC_ID` (optional)
 
+## Google OAuth (Personal Account Friendly)
+- 목적: 서비스계정 쿼터 이슈 없이 본인 Google 계정으로 Drive/Docs 접근
+- Worker auth 우선순위:
+  1. `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET` + `GOOGLE_OAUTH_REFRESH_TOKEN`
+  2. 없으면 `GOOGLE_SERVICE_ACCOUNT_JSON`
+- 필요한 값:
+  - `GOOGLE_OAUTH_CLIENT_ID`
+  - `GOOGLE_OAUTH_CLIENT_SECRET`
+  - `GOOGLE_OAUTH_REFRESH_TOKEN`
+- 위 3개를 설정하면 Worker는 refresh token으로 access token을 발급받아 템플릿 복사/PDF 저장을 수행
+
 ## Contract Template PDF Flow
 - 목적: 웹 화면 PDF가 아니라 "계약서 템플릿"에 데이터를 채워 PDF 생성
 - 권장 방식:
@@ -67,8 +78,23 @@ This keeps `auth.uid()`-based RLS while hiding email input from staff users.
   1. Worker가 템플릿을 복사
   2. 플레이스홀더를 계약 데이터로 치환
   3. PDF로 내보내기
-  4. Drive 폴더에 PDF 저장
+  4. Drive `계약서` 루트 폴더 하위에 직원별 폴더 자동 생성 후 PDF 저장
   5. 직원은 상세화면 `계약서 PDF 다운로드` 버튼으로 직접 다운로드
+- 플레이스홀더 전체 목록: `worker/TEMPLATE_PLACEHOLDERS.md`
+
+### HWPX -> Google Docs 권장 절차(실무)
+1. 한글(HWP)에서 `다른 이름으로 저장` -> `DOCX`로 저장
+2. Google Drive에 DOCX 업로드 -> `Google Docs로 열기`
+3. 템플릿 문구를 유지한 채 필요한 위치를 `{{...}}` 키로 교체
+4. 문서 URL에서 문서 ID 복사
+5. Worker env에 설정:
+   - `GOOGLE_TEMPLATE_ADJUSTER_DOC_ID` (손해사정사)
+   - `GOOGLE_TEMPLATE_ADMIN_DOC_ID` (행정사)
+   - `GOOGLE_TEMPLATE_COMBINED_DOC_ID` (손해사정사+행정사, 선택)
+
+주의:
+- `drive.google.com/file/d/...` 형태의 일반 파일 링크는 템플릿 치환이 안 될 수 있습니다.
+- 템플릿은 가급적 `docs.google.com/document/d/...` 형태의 Google Docs 문서로 사용하세요.
 
 ## Deploy Overview
 ### Worker

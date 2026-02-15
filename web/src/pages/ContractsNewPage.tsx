@@ -4,6 +4,7 @@ import { Card } from '../components/Card';
 import { Label, PrimaryButton, TextArea, TextInput } from '../components/FormControls';
 import { SignaturePad } from '../components/SignaturePad';
 import { supabase, type EmployeeProfile } from '../lib/supabase';
+import { ensureValidAccessToken } from '../lib/session';
 
 const workerBase = '/api';
 const CONTRACT_TYPE_OPTIONS = ['손해사정사', '행정사', '손해사정사+행정사'] as const;
@@ -107,13 +108,13 @@ export function ContractsNewPage({ profile }: { profile: EmployeeProfile }) {
         throw new Error(dbError?.message || '계약 저장 실패');
       }
 
-      const session = (await supabase.auth.getSession()).data.session;
-      if (session?.access_token && workerBase) {
+      if (workerBase) {
+        const accessToken = await ensureValidAccessToken();
         const syncRes = await fetch(`${workerBase}/integrations/google/sync`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${session.access_token}`
+            Authorization: `Bearer ${accessToken}`
           },
           body: JSON.stringify({ contract_id: data.id })
         });

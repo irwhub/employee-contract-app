@@ -1,10 +1,15 @@
-import bcrypt from 'bcryptjs';
+﻿import bcrypt from 'bcryptjs';
+import { PDFDocument } from 'pdf-lib';
 
 interface Env {
   SUPABASE_URL: string;
   SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
-  GOOGLE_SERVICE_ACCOUNT_JSON: string;
+  GOOGLE_SERVICE_ACCOUNT_JSON?: string;
+  GOOGLE_OAUTH_CLIENT_ID?: string;
+  GOOGLE_OAUTH_CLIENT_SECRET?: string;
+  GOOGLE_OAUTH_REFRESH_TOKEN?: string;
+  GOOGLE_OAUTH_ACCESS_TOKEN?: string;
   GOOGLE_DRIVE_FOLDER_ID: string;
   GOOGLE_SHEET_ID: string;
   GOOGLE_SHEET_TAB_NAME?: string;
@@ -102,6 +107,40 @@ async function signJwtRS256(payload: Record<string, unknown>, privateKeyPem: str
 }
 
 async function getGoogleAccessToken(env: Env) {
+  // Prefer refresh-token flow (stable), then fallback to a fixed access token.
+  if (env.GOOGLE_OAUTH_CLIENT_ID && env.GOOGLE_OAUTH_CLIENT_SECRET && env.GOOGLE_OAUTH_REFRESH_TOKEN) {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: env.GOOGLE_OAUTH_CLIENT_ID,
+        client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+        refresh_token: env.GOOGLE_OAUTH_REFRESH_TOKEN
+      })
+    });
+
+    if (tokenRes.ok) {
+      const tokenJson = (await tokenRes.json()) as { access_token: string };
+      return tokenJson.access_token;
+    }
+
+    if (!env.GOOGLE_OAUTH_ACCESS_TOKEN) {
+      const msg = await tokenRes.text();
+      throw new Error(`Google OAuth refresh failed: ${msg}`);
+    }
+  }
+
+  if (env.GOOGLE_OAUTH_ACCESS_TOKEN) {
+    return env.GOOGLE_OAUTH_ACCESS_TOKEN;
+  }
+
+  if (!env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    throw new Error(
+      'Google auth config missing: set GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN (recommended), GOOGLE_OAUTH_ACCESS_TOKEN, or GOOGLE_SERVICE_ACCOUNT_JSON'
+    );
+  }
+
   const sa = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const now = Math.floor(Date.now() / 1000);
   const assertion = await signJwtRS256(
@@ -112,7 +151,7 @@ async function getGoogleAccessToken(env: Env) {
       iat: now,
       exp: now + 3600,
       scope:
-        'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/documents'
+        'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/documents'
     },
     sa.private_key
   );
@@ -136,15 +175,18 @@ async function getGoogleAccessToken(env: Env) {
 }
 
 async function getUserFromAccessToken(env: Env, accessToken: string) {
+  const token = String(accessToken || '').trim();
+  const bearer = token.startsWith('Bearer ') ? token.replace(/^Bearer\s+/i, '') : token;
   const res = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
     headers: {
       apikey: env.SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${accessToken}`
+      Authorization: `Bearer ${bearer}`
     }
   });
 
   if (!res.ok) {
-    throw new Error('Invalid access token.');
+    const raw = await res.text().catch(() => '');
+    throw new Error(`Invalid access token. details=${raw || `status=${res.status}`}`);
   }
 
   return (await res.json()) as { id: string; email?: string };
@@ -347,19 +389,63 @@ async function createDriveJsonFile(env: Env, googleToken: string, filename: stri
 }
 
 function pickTemplateDocId(env: Env, contractType: string) {
-  if (contractType === '손해사정사') return env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID;
-  if (contractType === '행정사') return env.GOOGLE_TEMPLATE_ADMIN_DOC_ID;
-  if (contractType === '손해사정사+행정사')
+  const ADJUSTER = '\uC190\uD574\uC0AC\uC815\uC0AC';
+  const ADMIN = '\uD589\uC815\uC0AC';
+  const COMBINED = '\uC190\uD574\uC0AC\uC815\uC0AC+\uD589\uC815\uC0AC';
+
+  if (contractType === ADJUSTER) return env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID;
+  if (contractType === ADMIN) return env.GOOGLE_TEMPLATE_ADMIN_DOC_ID;
+  if (contractType === COMBINED) {
     return env.GOOGLE_TEMPLATE_COMBINED_DOC_ID || env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID;
-  return env.GOOGLE_TEMPLATE_COMBINED_DOC_ID || env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID || env.GOOGLE_TEMPLATE_ADMIN_DOC_ID;
+  }
+  return (
+    env.GOOGLE_TEMPLATE_COMBINED_DOC_ID ||
+    env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID ||
+    env.GOOGLE_TEMPLATE_ADMIN_DOC_ID
+  );
+}
+
+function getTemplatePlan(env: Env, contractType: string) {
+  const ADJUSTER = '\uC190\uD574\uC0AC\uC815\uC0AC';
+  const ADMIN = '\uD589\uC815\uC0AC';
+  const COMBINED = '\uC190\uD574\uC0AC\uC815\uC0AC+\uD589\uC815\uC0AC';
+
+  if (contractType === ADJUSTER) {
+    return env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID
+      ? [{ kind: 'adjuster' as const, docId: env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID }]
+      : [];
+  }
+  if (contractType === ADMIN) {
+    return env.GOOGLE_TEMPLATE_ADMIN_DOC_ID
+      ? [{ kind: 'admin' as const, docId: env.GOOGLE_TEMPLATE_ADMIN_DOC_ID }]
+      : [];
+  }
+  if (contractType === COMBINED) {
+    const combined = env.GOOGLE_TEMPLATE_COMBINED_DOC_ID;
+    const adj = env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID;
+    const adm = env.GOOGLE_TEMPLATE_ADMIN_DOC_ID;
+
+    // If a dedicated combined template is configured (and distinct), use it.
+    if (combined && combined !== adj && combined !== adm) {
+      return [{ kind: 'combined' as const, docId: combined }];
+    }
+
+    // Otherwise generate both adjuster + admin templates.
+    const plan: Array<{ kind: 'adjuster' | 'admin'; docId: string }> = [];
+    if (adj) plan.push({ kind: 'adjuster', docId: adj });
+    if (adm) plan.push({ kind: 'admin', docId: adm });
+    return plan;
+  }
+
+  const fallback = pickTemplateDocId(env, contractType);
+  return fallback ? [{ kind: 'fallback' as const, docId: fallback }] : [];
 }
 
 function toText(value: unknown) {
   if (value === null || value === undefined) return '';
-  if (typeof value === 'boolean') return value ? '예' : '아니오';
+  if (typeof value === 'boolean') return value ? '\uB3D9\uC758' : '\uBBF8\uB3D9\uC758';
   return String(value);
 }
-
 function createPlaceholderMap(contract: Record<string, unknown>) {
   return {
     employee_name: toText(contract.employee_name),
@@ -394,16 +480,40 @@ function createPlaceholderMap(contract: Record<string, unknown>) {
   };
 }
 
-async function copyGoogleDocTemplate(googleToken: string, templateDocId: string, title: string) {
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${templateDocId}/copy?fields=id,name`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${googleToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ name: title })
-  });
-  if (!res.ok) throw new Error(`Template copy failed: ${await res.text()}`);
+async function copyGoogleDocTemplate(
+  googleToken: string,
+  templateDocId: string,
+  title: string,
+  destinationFolderId?: string
+) {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${templateDocId}/copy?fields=id,name&supportsAllDrives=true`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${googleToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: title,
+        ...(destinationFolderId ? { parents: [destinationFolderId] } : {})
+      })
+    }
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    if (res.status === 404) {
+      throw new Error(
+        `Template copy failed(404). Check template file ID and share the template with the service account as Editor. detail=${detail}`
+      );
+    }
+    if (res.status === 403 && detail.includes('storageQuotaExceeded')) {
+      throw new Error(
+        `Template copy failed(403: storageQuotaExceeded). Service account Drive quota is full/unsupported. Use a Shared Drive target or switch to user OAuth flow. detail=${detail}`
+      );
+    }
+    throw new Error(`Template copy failed: ${detail}`);
+  }
   return (await res.json()) as { id: string; name: string };
 }
 
@@ -450,17 +560,137 @@ function concatBytes(parts: Uint8Array[]) {
   return out;
 }
 
+function sanitizeDriveName(input: string) {
+  return input.replace(/[\\/:*?"<>|#\u0000-\u001F]/g, '_').trim() || 'unknown';
+}
+
+function formatYmdForFile(value?: unknown) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return value.replace(/-/g, '');
+  }
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+function makeContractPdfFilename(contract: Record<string, unknown>) {
+  const customerName = sanitizeDriveName(String(contract.customer_name || 'unknown'));
+  const ymd = formatYmdForFile(contract.created_at);
+  return `${customerName}-${ymd}.pdf`;
+}
+
+async function mergePdfFiles(pdfBytesList: Uint8Array[]) {
+  const merged = await PDFDocument.create();
+  for (const bytes of pdfBytesList) {
+    const src = await PDFDocument.load(bytes);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    pages.forEach((p) => merged.addPage(p));
+  }
+  return new Uint8Array(await merged.save());
+}
+
+async function deleteDriveFile(googleToken: string, fileId: string) {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+    {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${googleToken}` }
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Drive delete failed(${fileId}): ${await res.text()}`);
+  }
+}
+
+async function findOrCreateEmployeeFolder(
+  googleToken: string,
+  parentFolderId: string,
+  employeeName: string,
+  employeeAuthUserId: string
+) {
+  const folderName = sanitizeDriveName(employeeName);
+  const q = [
+    `'${parentFolderId}' in parents`,
+    `name = '${folderName.replace(/'/g, "\\'")}'`,
+    `mimeType = 'application/vnd.google-apps.folder'`,
+    'trashed = false'
+  ].join(' and ');
+
+  const searchRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+    {
+      headers: { Authorization: `Bearer ${googleToken}` }
+    }
+  );
+  if (!searchRes.ok) {
+    throw new Error(`Drive folder lookup failed: ${await searchRes.text()}`);
+  }
+
+  const searchJson = (await searchRes.json()) as { files?: Array<{ id: string; name: string }> };
+  const existing = searchJson.files?.[0];
+  if (existing?.id) {
+    return { id: existing.id, name: existing.name };
+  }
+
+  const createRes = await fetch(
+    'https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink&supportsAllDrives=true',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${googleToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [parentFolderId]
+      })
+    }
+  );
+  if (!createRes.ok) {
+    throw new Error(`Drive folder create failed: ${await createRes.text()}`);
+  }
+  const created = (await createRes.json()) as { id: string; name: string; webViewLink?: string };
+  return { id: created.id, name: created.name };
+}
+
 async function uploadPdfToDrive(
-  env: Env,
+  parentFolderId: string,
   googleToken: string,
   filename: string,
   pdfBytes: Uint8Array
 ) {
+  // Keep only the latest file for the same name in the same employee folder.
+  const escapedName = filename.replace(/'/g, "\\'");
+  const findRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+      `'${parentFolderId}' in parents and name = '${escapedName}' and trashed = false`
+    )}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+    {
+      headers: { Authorization: `Bearer ${googleToken}` }
+    }
+  );
+  if (!findRes.ok) {
+    throw new Error(`PDF duplicate lookup failed: ${await findRes.text()}`);
+  }
+
+  const existing = (await findRes.json()) as { files?: Array<{ id: string }> };
+  for (const file of existing.files || []) {
+    const delRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${file.id}?supportsAllDrives=true`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${googleToken}` }
+      }
+    );
+    if (!delRes.ok) {
+      throw new Error(`PDF duplicate delete failed: ${await delRes.text()}`);
+    }
+  }
+
   const boundary = `boundary_${crypto.randomUUID()}`;
   const encoder = new TextEncoder();
   const metadata = {
     name: filename,
-    parents: [env.GOOGLE_DRIVE_FOLDER_ID],
+    parents: [parentFolderId],
     mimeType: 'application/pdf'
   };
 
@@ -473,7 +703,7 @@ async function uploadPdfToDrive(
   const body = concatBytes([head, pdfBytes, tail]);
 
   const res = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name',
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name&supportsAllDrives=true',
     {
       method: 'POST',
       headers: {
@@ -491,11 +721,16 @@ async function handleGoogleSync(req: Request, env: Env) {
   if (!env.SUPABASE_SERVICE_ROLE_KEY) {
     return json({ error: 'worker config missing: SUPABASE_SERVICE_ROLE_KEY' }, 500);
   }
-  if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || !env.GOOGLE_DRIVE_FOLDER_ID || !env.GOOGLE_SHEET_ID) {
+  const hasOauth =
+    Boolean(env.GOOGLE_OAUTH_CLIENT_ID) &&
+    Boolean(env.GOOGLE_OAUTH_CLIENT_SECRET) &&
+    Boolean(env.GOOGLE_OAUTH_REFRESH_TOKEN);
+  const hasServiceAccount = Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (!env.GOOGLE_DRIVE_FOLDER_ID || (!hasOauth && !hasServiceAccount)) {
     return json(
       {
         error:
-          'worker config missing: GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_DRIVE_FOLDER_ID / GOOGLE_SHEET_ID'
+          'worker config missing: GOOGLE_DRIVE_FOLDER_ID and one auth method (GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN or GOOGLE_SERVICE_ACCOUNT_JSON)'
       },
       500
     );
@@ -542,20 +777,23 @@ async function handleGoogleSync(req: Request, env: Env) {
 
   const googleToken = await getGoogleAccessToken(env);
 
-  const row = [
-    String(contract.id),
-    String(contract.employee_name || ''),
-    String(contract.customer_name || ''),
-    String(contract.customer_phone || ''),
-    String(contract.contract_type || ''),
-    String(contract.confirmed || false),
-    String(contract.created_at || ''),
-    new Date().toISOString()
-  ];
-  const updatedRange = await appendToSheet(env, googleToken, row);
+  let updatedRange: string | null = null;
+  if (env.GOOGLE_SHEET_ID) {
+    const row = [
+      String(contract.id),
+      String(contract.employee_name || ''),
+      String(contract.customer_name || ''),
+      String(contract.customer_phone || ''),
+      String(contract.contract_type || ''),
+      String(contract.confirmed || false),
+      String(contract.created_at || ''),
+      new Date().toISOString()
+    ];
+    updatedRange = await appendToSheet(env, googleToken, row);
+  }
 
-  const templateDocId = pickTemplateDocId(env, String(contract.contract_type || ''));
-  if (!templateDocId) {
+  const templatePlan = getTemplatePlan(env, String(contract.contract_type || ''));
+  if (templatePlan.length === 0) {
     return json(
       {
         error:
@@ -565,19 +803,50 @@ async function handleGoogleSync(req: Request, env: Env) {
     );
   }
 
-  const docCopy = await copyGoogleDocTemplate(
+  const employeeFolder = await findOrCreateEmployeeFolder(
     googleToken,
-    templateDocId,
-    `계약서_${contract.customer_name || contract.id}_${new Date().toISOString().slice(0, 10)}`
+    env.GOOGLE_DRIVE_FOLDER_ID,
+    String(contract.employee_name || employee.name || 'staff'),
+    String(contract.created_by || user.id)
   );
-  await replacePlaceholdersInDoc(googleToken, docCopy.id, createPlaceholderMap(contract));
-  const pdfBytes = await exportGoogleDocPdf(googleToken, docCopy.id);
-  const pdfFile = await uploadPdfToDrive(
-    env,
-    googleToken,
-    `contract_${contract.id}.pdf`,
-    pdfBytes
-  );
+  const pdfParts: Array<{ kind: string; bytes: Uint8Array }> = [];
+  for (const item of templatePlan) {
+    const docCopy = await copyGoogleDocTemplate(
+      googleToken,
+      item.docId,
+      `contract_${item.kind}_${contract.customer_name || contract.id}_${new Date().toISOString().slice(0, 10)}`,
+      employeeFolder.id
+    );
+    try {
+      await replacePlaceholdersInDoc(googleToken, docCopy.id, createPlaceholderMap(contract));
+      const pdfBytes = await exportGoogleDocPdf(googleToken, docCopy.id);
+      pdfParts.push({ kind: item.kind, bytes: pdfBytes });
+    } finally {
+      // PDF export is done from this temporary doc, so remove it to keep Drive clean.
+      await deleteDriveFile(googleToken, docCopy.id);
+    }
+  }
+
+  if (pdfParts.length === 0) {
+    return json({ error: 'No PDF generated from template plan.' }, 500);
+  }
+
+  const fileName = makeContractPdfFilename(contract);
+  let finalPdfBytes = pdfParts[0]!.bytes;
+  if (pdfParts.length > 1) {
+    finalPdfBytes = await mergePdfFiles(pdfParts.map((p) => p.bytes));
+  }
+
+  const pdfFile = await uploadPdfToDrive(employeeFolder.id, googleToken, fileName, finalPdfBytes);
+  const generatedFiles: Array<{ kind: string; id: string; link: string }> = [
+    {
+      kind: pdfParts.length > 1 ? 'combined_merged' : pdfParts[0]!.kind,
+      id: pdfFile.id,
+      link: pdfFile.webViewLink || `https://drive.google.com/file/d/${pdfFile.id}/view`
+    }
+  ];
+
+  const primary = generatedFiles[0];
 
   const rowMatch = updatedRange?.match(/!(?:[A-Z]+)(\d+):/);
   const rowId = rowMatch?.[1] || null;
@@ -591,15 +860,18 @@ async function handleGoogleSync(req: Request, env: Env) {
       Prefer: 'return=minimal'
     },
     body: JSON.stringify({
-      drive_file_id: pdfFile.id,
+      drive_file_id: primary.id,
       sheet_row_id: rowId
     })
   });
 
   return json({
     ok: true,
-    drive_file_id: pdfFile.id,
-    drive_link: pdfFile.webViewLink || `https://drive.google.com/file/d/${pdfFile.id}/view`,
+    drive_file_id: primary.id,
+    drive_link: primary.link,
+    generated_files: generatedFiles,
+    employee_folder_id: employeeFolder.id,
+    employee_folder_name: employeeFolder.name,
     sheet_row: rowId,
     updated_range: updatedRange
   });
@@ -619,7 +891,7 @@ async function handleContractPdfDownload(req: Request, env: Env, contractId: str
   }
 
   const contractRes = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/contracts?id=eq.${contractId}&select=id,created_by,drive_file_id,customer_name`,
+    `${env.SUPABASE_URL}/rest/v1/contracts?id=eq.${contractId}&select=id,created_by,drive_file_id,customer_name,created_at`,
     {
       headers: {
         apikey: env.SUPABASE_SERVICE_ROLE_KEY,
@@ -632,6 +904,7 @@ async function handleContractPdfDownload(req: Request, env: Env, contractId: str
     created_by: string;
     drive_file_id: string | null;
     customer_name: string | null;
+    created_at: string | null;
   }>;
   const contract = contracts[0];
   if (!contract) return json({ error: 'contract not found.' }, 404);
@@ -656,14 +929,14 @@ async function handleContractPdfDownload(req: Request, env: Env, contractId: str
     return json({ error: `PDF download failed: ${await pdfRes.text()}` }, 500);
   }
 
-  const filenameBase = contract.customer_name || contract.id;
+  const filenameBase = `${sanitizeDriveName(String(contract.customer_name || 'unknown'))}-${formatYmdForFile(
+    contract.created_at
+  )}`;
   return new Response(await pdfRes.arrayBuffer(), {
     headers: {
       ...corsHeaders,
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(
-        `contract_${filenameBase}.pdf`
-      )}`
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(`${filenameBase}.pdf`)}`
     }
   });
 }
@@ -706,7 +979,11 @@ export default {
       return json({ error: 'Not Found' }, 404);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error';
+      if (message.startsWith('Invalid access token.')) {
+        return json({ error: message }, 401);
+      }
       return json({ error: message }, 500);
     }
   }
 };
+

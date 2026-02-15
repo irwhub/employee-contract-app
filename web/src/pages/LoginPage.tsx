@@ -1,10 +1,9 @@
 ﻿import { useState } from 'react';
 import { Card } from '../components/Card';
 import { Label, PrimaryButton, TextInput } from '../components/FormControls';
-import { supabase } from '../lib/supabase';
+import { setFallbackFromSessionResult } from '../lib/session';
 
 const workerBase = '/api';
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 
 interface LoginPageProps {
   onLoginDone: () => void;
@@ -17,25 +16,7 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const formatDob = (input: string) => {
-    const digits = input.replace(/\D/g, '').slice(0, 8);
-    if (digits.length <= 4) return digits;
-    if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
-    return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
-  };
-
-  const persistSessionFallback = (session: { access_token: string; refresh_token: string }) => {
-    if (!supabaseUrl) return false;
-    try {
-      const host = new URL(supabaseUrl).hostname;
-      const projectRef = host.split('.')[0];
-      const storageKey = `sb-${projectRef}-auth-token`;
-      localStorage.setItem(storageKey, JSON.stringify(session));
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  const normalizeDobInput = (input: string) => input.replace(/[^\d-]/g, '').slice(0, 10);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,40 +61,25 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
         throw new Error('로그인 응답이 올바르지 않습니다. worker 응답을 확인해주세요.');
       }
 
-      const { access_token, refresh_token } = payload.session;
-      const setSessionWithTimeout = async (timeoutMs: number) =>
-        (await Promise.race([
-          supabase.auth.setSession({ access_token, refresh_token }),
-          new Promise<never>((_, reject) =>
-            window.setTimeout(() => reject(new Error('세션 저장 지연')), timeoutMs)
-          )
-        ])) as Awaited<ReturnType<typeof supabase.auth.setSession>>;
+      const session = {
+        access_token: payload.session.access_token,
+        refresh_token: payload.session.refresh_token,
+        expires_at: payload.session.expires_at
+      };
 
-      try {
-        let result = await setSessionWithTimeout(7000);
-        if (result.error) {
-          result = await setSessionWithTimeout(7000);
-        }
-        if (result.error) {
-          throw result.error;
-        }
-      } catch {
-        const fallbackOk = persistSessionFallback({ access_token, refresh_token });
-        if (!fallbackOk) {
-          throw new Error('세션 저장이 지연되고 있습니다. 잠시 후 다시 시도해주세요.');
-        }
-      }
+      await setFallbackFromSessionResult(session);
 
       if (payload.profile) {
         localStorage.setItem('employee_profile_fallback', JSON.stringify(payload.profile));
       }
 
+      setLoading(false);
       onLoginDone();
+      return;
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         setError('로그인 요청이 지연되고 있습니다. 잠시 후 다시 시도해주세요.');
-      } else
-      if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
+      } else if (err instanceof TypeError && err.message.includes('Failed to fetch')) {
         setError('서버 연결 실패: worker가 실행 중인지 확인해주세요. (http://127.0.0.1:8787)');
       } else {
         setError(err instanceof Error ? err.message : '로그인 중 오류가 발생했습니다.');
@@ -134,18 +100,26 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
           <form className="space-y-4" onSubmit={onSubmit}>
             <div>
               <Label text="직원 이름" />
-              <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="홍길동" required />
+              <TextInput
+                lang="ko-KR"
+                autoFocus
+                style={{ imeMode: 'active' }}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="홍길동"
+                required
+              />
             </div>
             <div>
-              <Label text="생년월일 (YYYY-MM-DD)" />
+              <Label text="생년월일 (YYMMDD)" />
               <TextInput
                 type="text"
-                inputMode="numeric"
-                pattern="\d{4}-\d{2}-\d{2}"
+                inputMode="text"
+                pattern="(\d{6}|\d{8}|\d{4}-\d{2}-\d{2})"
                 value={dob}
                 maxLength={10}
-                placeholder="예: 1992-08-12 또는 19920812"
-                onChange={(e) => setDob(formatDob(e.target.value))}
+                placeholder="예: 920812"
+                onChange={(e) => setDob(normalizeDobInput(e.target.value))}
                 required
               />
             </div>
@@ -170,5 +144,3 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
     </div>
   );
 }
-
-

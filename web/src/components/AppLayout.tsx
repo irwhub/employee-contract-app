@@ -1,5 +1,6 @@
 ﻿import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { clearAuthState } from '../lib/session';
 import type { EmployeeProfile } from '../lib/supabase';
 
 interface AppLayoutProps {
@@ -10,8 +11,13 @@ export function AppLayout({ profile }: AppLayoutProps) {
   const navigate = useNavigate();
 
   const onLogout = async () => {
-    await supabase.auth.signOut();
-    navigate('/login');
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      clearAuthState();
+      navigate('/', { replace: true });
+      window.location.assign('/');
+    }
   };
 
   const menu = [
@@ -29,7 +35,11 @@ export function AppLayout({ profile }: AppLayoutProps) {
           </Link>
           <div className="flex items-center gap-2 text-sm">
             <span className="rounded-full bg-white/20 px-3 py-1">{profile.name} ({profile.role})</span>
-            <button className="rounded-lg bg-white/15 px-3 py-1.5 hover:bg-white/25" onClick={onLogout}>
+            <button
+              type="button"
+              className="rounded-lg bg-white/15 px-3 py-1.5 hover:bg-white/25"
+              onClick={onLogout}
+            >
               로그아웃
             </button>
           </div>
@@ -42,7 +52,9 @@ export function AppLayout({ profile }: AppLayoutProps) {
             key={item.to}
             to={item.to}
             className={({ isActive }) =>
-              `rounded-xl px-4 py-2 text-sm font-medium ${isActive ? 'bg-brand-100 text-brand-700' : 'bg-white text-slate-600 ring-1 ring-slate-200'}`
+              `rounded-xl px-4 py-2 text-sm font-medium ${
+                isActive ? 'bg-brand-100 text-brand-700' : 'bg-white text-slate-600 ring-1 ring-slate-200'
+              }`
             }
           >
             {item.label}
@@ -56,4 +68,3 @@ export function AppLayout({ profile }: AppLayoutProps) {
     </div>
   );
 }
-

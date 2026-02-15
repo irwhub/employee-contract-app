@@ -12,6 +12,7 @@ import { ContractDetailPage } from './pages/ContractDetailPage';
 import { ContractsNewPage } from './pages/ContractsNewPage';
 import { ContractsPage } from './pages/ContractsPage';
 import { LoginPage } from './pages/LoginPage';
+import { clearAuthState } from './lib/session';
 
 function ProtectedRoutes({ profile }: { profile: EmployeeProfile }) {
   return (
@@ -50,12 +51,14 @@ export default function App() {
         const { data, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) {
           console.error('getSession error:', sessionError.message);
+          clearAuthState();
           setProfile(null);
           return;
         }
 
         const userId = data.session?.user.id;
         if (!userId) {
+          clearAuthState();
           setProfile(null);
           return;
         }
@@ -68,6 +71,7 @@ export default function App() {
 
         if (employeeError) {
           console.error('employee fetch error:', employeeError.message);
+          clearAuthState();
           setProfile(null);
           return;
         }
@@ -75,6 +79,7 @@ export default function App() {
         setProfile(employee as EmployeeProfile | null);
       } catch (err) {
         console.error('bootstrap error:', err);
+        clearAuthState();
         setProfile(null);
       } finally {
         setLoading(false);
@@ -88,6 +93,7 @@ export default function App() {
       try {
         const userId = session?.user.id;
         if (!userId) {
+          clearAuthState();
           setProfile(null);
           return;
         }
@@ -100,6 +106,7 @@ export default function App() {
 
         if (employeeError) {
           console.error('auth change employee fetch error:', employeeError.message);
+          clearAuthState();
           setProfile(null);
           return;
         }
@@ -107,6 +114,7 @@ export default function App() {
         setProfile(employee as EmployeeProfile | null);
       } catch (err) {
         console.error('auth change error:', err);
+        clearAuthState();
         setProfile(null);
       }
     });

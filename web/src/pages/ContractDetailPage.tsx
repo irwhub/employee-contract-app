@@ -4,6 +4,7 @@ import { Card } from '../components/Card';
 import { GhostButton, Label, PrimaryButton, TextArea, TextInput } from '../components/FormControls';
 import { SignaturePad } from '../components/SignaturePad';
 import { supabase, type Contract, type EmployeeProfile } from '../lib/supabase';
+import { ensureValidAccessToken } from '../lib/session';
 
 const workerBase = '/api';
 const CONTRACT_TYPE_OPTIONS = ['손해사정사', '행정사', '손해사정사+행정사'] as const;
@@ -17,6 +18,22 @@ const DELEGATION_OPTIONS = [
   { key: 'delegation_school_safety', label: '학교안전공제회' },
   { key: 'delegation_other', label: '기타' }
 ] as const;
+
+function toUserFriendlyError(error: unknown, fallback = '처리 중 오류가 발생했습니다.') {
+  const raw = typeof error === 'string' ? error : JSON.stringify(error || '');
+  if (
+    raw.includes('UNAUTHENTICATED') ||
+    raw.includes('Invalid Credentials') ||
+    raw.includes('authError') ||
+    raw.includes('Invalid access token')
+  ) {
+    return '세션이 만료되었습니다. 다시 로그인 해주세요.';
+  }
+  if (raw.includes('Drive folder lookup failed')) {
+    return '구글 드라이브 접근 권한 확인이 필요합니다. 관리자에게 문의해주세요.';
+  }
+  return typeof error === 'string' && error ? error : fallback;
+}
 
 export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
   const navigate = useNavigate();
@@ -36,6 +53,14 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     if (digits.length <= 4) return digits;
     if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
     return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+  };
+
+  const getAccessTokenOrThrow = async () => {
+    const session = await ensureValidAccessToken();
+    if (!session) {
+      throw new Error('세션이 만료되었습니다. 다시 로그인 해주세요.');
+    }
+    return session;
   };
 
   useEffect(() => {
@@ -100,64 +125,87 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       return;
     }
 
-    await onSync(contract.id);
+    const syncResult = await onSync(contract.id, { suppressUiError: true, suppressUiSuccess: true });
+    if (!syncResult.ok) {
+      setError(null);
+      setSaving(false);
+      setIsEditing(false);
+      setOriginalContract(contract);
+      setMessage('저장은 완료되었습니다. PDF 자동 생성은 실패했습니다.');
+      return;
+    }
+
+    await onDownloadPdf({ skipSync: true });
     setSaving(false);
     setIsEditing(false);
     setOriginalContract(contract);
-    setMessage('저장이 완료되었습니다.');
+    setMessage('저장 및 PDF 다운로드가 완료되었습니다.');
   };
 
-  const onSync = async (contractId?: string) => {
+  const onSync = async (
+    contractId?: string,
+    options?: { suppressUiError?: boolean; suppressUiSuccess?: boolean }
+  ): Promise<{ ok: boolean; driveFileId?: string; error?: string }> => {
     const targetId = contractId || contract?.id;
-    if (!targetId || !workerBase) return;
+    if (!targetId || !workerBase) return { ok: false, error: 'contract_id not found' };
 
     setSyncing(true);
     setError(null);
 
-    const getAccessToken = async () => {
-      const current = (await supabase.auth.getSession()).data.session;
-      if (current?.access_token) return current.access_token;
-
-      const refreshed = await supabase.auth.refreshSession();
-      if (refreshed.error) {
-        throw new Error('세션이 만료되었습니다. 다시 로그인 해주세요.');
-      }
-      const token = refreshed.data.session?.access_token;
-      if (!token) {
-        throw new Error('세션이 만료되었습니다. 다시 로그인 해주세요.');
-      }
-      return token;
-    };
-
     let accessToken = '';
     try {
-      accessToken = await getAccessToken();
+      accessToken = await getAccessTokenOrThrow();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '세션이 만료되었습니다. 다시 로그인 해주세요.');
+      if (!options?.suppressUiError) {
+        setError(err instanceof Error ? err.message : '세션이 만료되었습니다. 다시 로그인 해주세요.');
+      }
       setSyncing(false);
-      return;
+      return { ok: false, error: err instanceof Error ? err.message : 'token error' };
     }
 
-    const res = await fetch(`${workerBase}/integrations/google/sync`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`
-      },
-      body: JSON.stringify({ contract_id: targetId })
-    });
+    const callSync = async (token: string) =>
+      fetch(`${workerBase}/integrations/google/sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ contract_id: targetId })
+      });
+
+    let res = await callSync(accessToken);
+    if (res.status === 401) {
+      try {
+        accessToken = await getAccessTokenOrThrow();
+        res = await callSync(accessToken);
+      } catch {
+        // handled by res error below
+      }
+    }
 
     const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setError(payload.error || '동기화 실패');
+      if (!options?.suppressUiError) {
+        setError(toUserFriendlyError(payload.error, '동기화 실패'));
+      }
+      setSyncing(false);
+      return { ok: false, error: toUserFriendlyError(payload.error, 'sync failed') };
     } else {
-      setMessage(`동기화 완료: ${payload.drive_link || 'Drive 파일 생성됨'}`);
+      if (!options?.suppressUiSuccess) {
+        setMessage('PDF 생성 및 저장이 완료되었습니다.');
+      }
       const { data } = await supabase.from('contracts').select('*').eq('id', targetId).single();
       setContract(data as Contract);
       setOriginalContract(data as Contract);
+      setSyncing(false);
+      return {
+        ok: true,
+        driveFileId:
+          typeof payload.drive_file_id === 'string' && payload.drive_file_id
+            ? payload.drive_file_id
+            : (data as Contract | null)?.drive_file_id || undefined
+      };
     }
-
-    setSyncing(false);
   };
 
   const onDelete = async () => {
@@ -172,42 +220,49 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     navigate('/contracts');
   };
 
-  const onDownloadPdf = async () => {
+  const onDownloadPdf = async (options?: { skipSync?: boolean }) => {
     if (!contract?.id) return;
     setError(null);
-    const getAccessToken = async () => {
-      const current = (await supabase.auth.getSession()).data.session;
-      if (current?.access_token) return current.access_token;
-
-      const refreshed = await supabase.auth.refreshSession();
-      if (refreshed.error) {
-        throw new Error('세션이 만료되었습니다. 다시 로그인 해주세요.');
-      }
-      const token = refreshed.data.session?.access_token;
-      if (!token) {
-        throw new Error('세션이 만료되었습니다. 다시 로그인 해주세요.');
-      }
-      return token;
-    };
+    setMessage('최신 계약서 PDF를 준비 중입니다...');
 
     let accessToken = '';
     try {
-      accessToken = await getAccessToken();
+      accessToken = await getAccessTokenOrThrow();
     } catch (err) {
       setError(err instanceof Error ? err.message : '세션이 만료되었습니다. 다시 로그인 해주세요.');
       return;
     }
 
-    const res = await fetch(`${workerBase}/contracts/${contract.id}/pdf`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${accessToken}`
+    if (!options?.skipSync) {
+      const syncResult = await onSync(contract.id, { suppressUiSuccess: true });
+      if (!syncResult.ok) {
+        setMessage(null);
+        return;
       }
-    });
+    }
+
+    const fetchPdf = async (token: string) =>
+      fetch(`${workerBase}/contracts/${contract.id}/pdf`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+    let res = await fetchPdf(accessToken);
+    if (res.status === 401) {
+      try {
+        accessToken = await getAccessTokenOrThrow();
+        res = await fetchPdf(accessToken);
+      } catch {
+        // handled by response error below
+      }
+    }
 
     if (!res.ok) {
       const payload = await res.json().catch(() => ({}));
-      setError(payload.error || 'PDF 다운로드에 실패했습니다.');
+      setError(toUserFriendlyError(payload.error, 'PDF 다운로드에 실패했습니다.'));
+      setMessage(null);
       return;
     }
 
@@ -220,6 +275,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     a.click();
     a.remove();
     window.URL.revokeObjectURL(url);
+    setMessage('PDF 다운로드가 완료되었습니다.');
   };
 
   if (loading) return <p className="text-sm text-slate-500">불러오는 중...</p>;
@@ -549,7 +605,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             취소
           </GhostButton>
         )}
-        <GhostButton type="button" onClick={onDownloadPdf}>
+        <GhostButton type="button" onClick={() => void onDownloadPdf()}>
           계약서 PDF 다운로드
         </GhostButton>
         {profile.role === 'admin' && (

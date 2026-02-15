@@ -9,18 +9,24 @@ export function Label({ text }: { text: string }) {
 }
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
+  const { lang = 'ko-KR', style, ...rest } = props;
   return (
     <input
-      {...props}
+      {...rest}
+      lang={lang}
+      style={{ imeMode: 'active', ...style }}
       className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
     />
   );
 }
 
 export function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const { lang = 'ko-KR', style, ...rest } = props;
   return (
     <textarea
-      {...props}
+      {...rest}
+      lang={lang}
+      style={{ imeMode: 'active', ...style }}
       className="min-h-28 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
     />
   );

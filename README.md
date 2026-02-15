@@ -53,6 +53,22 @@ This keeps `auth.uid()`-based RLS while hiding email input from staff users.
    - `GOOGLE_DRIVE_FOLDER_ID`
    - `GOOGLE_SHEET_ID`
    - `GOOGLE_SHEET_TAB_NAME` (optional)
+   - `GOOGLE_TEMPLATE_ADJUSTER_DOC_ID`
+   - `GOOGLE_TEMPLATE_ADMIN_DOC_ID`
+   - `GOOGLE_TEMPLATE_COMBINED_DOC_ID` (optional)
+
+## Contract Template PDF Flow
+- 목적: 웹 화면 PDF가 아니라 "계약서 템플릿"에 데이터를 채워 PDF 생성
+- 권장 방식:
+  1. 기존 `*.hwpx` 문서를 Google Docs로 1회 변환/작성
+  2. 문서 안에 플레이스홀더 삽입 (예: `{{customer_name}}`, `{{accident_date}}`)
+  3. 문서 ID를 Worker 환경변수에 설정
+- 저장 시 동작:
+  1. Worker가 템플릿을 복사
+  2. 플레이스홀더를 계약 데이터로 치환
+  3. PDF로 내보내기
+  4. Drive 폴더에 PDF 저장
+  5. 직원은 상세화면 `계약서 PDF 다운로드` 버튼으로 직접 다운로드
 
 ## Deploy Overview
 ### Worker

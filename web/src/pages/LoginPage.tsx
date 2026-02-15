@@ -17,6 +17,13 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const formatDob = (input: string) => {
+    const digits = input.replace(/\D/g, '').slice(0, 8);
+    if (digits.length <= 4) return digits;
+    if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+    return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+  };
+
   const persistSessionFallback = (session: { access_token: string; refresh_token: string }) => {
     if (!supabaseUrl) return false;
     try {
@@ -74,24 +81,26 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
       }
 
       const { access_token, refresh_token } = payload.session;
-      const setSessionWithTimeout = Promise.race([
-        supabase.auth.setSession({ access_token, refresh_token }),
-        new Promise<never>((_, reject) =>
-          window.setTimeout(() => reject(new Error('세션 저장이 지연되고 있습니다.')), 6000)
-        )
-      ]);
+      const setSessionWithTimeout = async (timeoutMs: number) =>
+        (await Promise.race([
+          supabase.auth.setSession({ access_token, refresh_token }),
+          new Promise<never>((_, reject) =>
+            window.setTimeout(() => reject(new Error('세션 저장 지연')), timeoutMs)
+          )
+        ])) as Awaited<ReturnType<typeof supabase.auth.setSession>>;
 
       try {
-        const { error: sessionError } = (await setSessionWithTimeout) as Awaited<
-          ReturnType<typeof supabase.auth.setSession>
-        >;
-        if (sessionError) {
-          throw sessionError;
+        let result = await setSessionWithTimeout(7000);
+        if (result.error) {
+          result = await setSessionWithTimeout(7000);
         }
-      } catch (setSessionError) {
-        const ok = persistSessionFallback({ access_token, refresh_token });
-        if (!ok) {
-          throw setSessionError;
+        if (result.error) {
+          throw result.error;
+        }
+      } catch {
+        const fallbackOk = persistSessionFallback({ access_token, refresh_token });
+        if (!fallbackOk) {
+          throw new Error('세션 저장이 지연되고 있습니다. 잠시 후 다시 시도해주세요.');
         }
       }
 
@@ -128,15 +137,15 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
               <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="홍길동" required />
             </div>
             <div>
-              <Label text="생년월일 (6자리)" />
+              <Label text="생년월일 (YYYY-MM-DD)" />
               <TextInput
                 type="text"
                 inputMode="numeric"
-                pattern="[0-9]{6}"
+                pattern="\d{4}-\d{2}-\d{2}"
                 value={dob}
-                maxLength={6}
-                placeholder="예: 920812"
-                onChange={(e) => setDob(e.target.value.replace(/\D/g, ''))}
+                maxLength={10}
+                placeholder="예: 1992-08-12 또는 19920812"
+                onChange={(e) => setDob(formatDob(e.target.value))}
                 required
               />
             </div>

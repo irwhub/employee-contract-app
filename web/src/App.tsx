@@ -22,10 +22,10 @@ function ProtectedRoutes({ profile }: { profile: EmployeeProfile }) {
         <Route path="/contracts/:id" element={<ContractDetailPage profile={profile} />} />
         <Route
           path="/admin"
-          element={profile.role === 'admin' ? <AdminPage /> : <Navigate to="/contracts" replace />}
+          element={profile.role === 'admin' ? <AdminPage /> : <Navigate to="/contracts/new" replace />}
         />
       </Route>
-      <Route path="*" element={<Navigate to="/contracts" replace />} />
+      <Route path="*" element={<Navigate to="/contracts/new" replace />} />
     </Routes>
   );
 }
@@ -35,18 +35,6 @@ export default function App() {
   const [profile, setProfile] = useState<EmployeeProfile | null>(null);
 
   useEffect(() => {
-    const readFallbackProfile = (userId?: string | null) => {
-      const raw = localStorage.getItem('employee_profile_fallback');
-      if (!raw) return null;
-      try {
-        const parsed = JSON.parse(raw) as EmployeeProfile;
-        if (!userId || parsed.auth_user_id === userId) return parsed;
-        return null;
-      } catch {
-        return null;
-      }
-    };
-
     const watchdog = window.setTimeout(() => {
       setLoading(false);
     }, 4000);
@@ -62,13 +50,13 @@ export default function App() {
         const { data, error: sessionError } = await supabase.auth.getSession();
         if (sessionError) {
           console.error('getSession error:', sessionError.message);
-          setProfile(readFallbackProfile(null));
+          setProfile(null);
           return;
         }
 
         const userId = data.session?.user.id;
         if (!userId) {
-          setProfile(readFallbackProfile(null));
+          setProfile(null);
           return;
         }
 
@@ -80,7 +68,7 @@ export default function App() {
 
         if (employeeError) {
           console.error('employee fetch error:', employeeError.message);
-          setProfile(readFallbackProfile(userId));
+          setProfile(null);
           return;
         }
 
@@ -100,7 +88,7 @@ export default function App() {
       try {
         const userId = session?.user.id;
         if (!userId) {
-          setProfile(readFallbackProfile(null));
+          setProfile(null);
           return;
         }
 
@@ -112,7 +100,7 @@ export default function App() {
 
         if (employeeError) {
           console.error('auth change employee fetch error:', employeeError.message);
-          setProfile(readFallbackProfile(userId));
+          setProfile(null);
           return;
         }
 
@@ -148,7 +136,7 @@ VITE_WORKER_URL=http://127.0.0.1:8787</pre>
   }
 
   if (!profile) {
-    return <LoginPage onLoginDone={() => window.location.assign('/contracts')} />;
+    return <LoginPage onLoginDone={() => window.location.assign('/contracts/new')} />;
   }
 
   return <ProtectedRoutes profile={profile} />;

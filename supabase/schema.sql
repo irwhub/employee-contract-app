@@ -20,8 +20,32 @@ create table if not exists public.contracts (
   employee_name text not null,
   contract_type text,
   customer_name text not null,
+  victim_or_insured text,
+  beneficiary_name text,
+  customer_gender text,
   customer_phone text,
+  customer_dob date,
+  customer_address text,
+  relation_to_party text,
+  accident_date date,
+  accident_location text,
+  accident_summary text,
+  delegation_auto_insurance boolean not null default false,
+  delegation_personal_insurance boolean not null default false,
+  delegation_workers_comp boolean not null default false,
+  delegation_disability_pension boolean not null default false,
+  delegation_employer_liability boolean not null default false,
+  delegation_school_safety boolean not null default false,
+  delegation_other boolean not null default false,
+  delegation_other_text text,
+  upfront_fee_ten_thousand integer,
+  admin_fee_percent numeric(5,2),
+  adjuster_fee_percent numeric(5,2),
+  fee_notes text,
   content text,
+  consent_personal_info boolean not null default false,
+  consent_required_terms boolean not null default false,
+  signature_data_url text,
   confirmed boolean not null default false,
   drive_file_id text,
   sheet_row_id text,
@@ -31,6 +55,31 @@ create table if not exists public.contracts (
 
 create index if not exists contracts_created_by_idx on public.contracts (created_by);
 create index if not exists contracts_created_at_idx on public.contracts (created_at desc);
+
+alter table public.contracts add column if not exists customer_gender text;
+alter table public.contracts add column if not exists victim_or_insured text;
+alter table public.contracts add column if not exists beneficiary_name text;
+alter table public.contracts add column if not exists customer_dob date;
+alter table public.contracts add column if not exists customer_address text;
+alter table public.contracts add column if not exists relation_to_party text;
+alter table public.contracts add column if not exists accident_date date;
+alter table public.contracts add column if not exists accident_location text;
+alter table public.contracts add column if not exists accident_summary text;
+alter table public.contracts add column if not exists delegation_auto_insurance boolean not null default false;
+alter table public.contracts add column if not exists delegation_personal_insurance boolean not null default false;
+alter table public.contracts add column if not exists delegation_workers_comp boolean not null default false;
+alter table public.contracts add column if not exists delegation_disability_pension boolean not null default false;
+alter table public.contracts add column if not exists delegation_employer_liability boolean not null default false;
+alter table public.contracts add column if not exists delegation_school_safety boolean not null default false;
+alter table public.contracts add column if not exists delegation_other boolean not null default false;
+alter table public.contracts add column if not exists delegation_other_text text;
+alter table public.contracts add column if not exists upfront_fee_ten_thousand integer;
+alter table public.contracts add column if not exists admin_fee_percent numeric(5,2);
+alter table public.contracts add column if not exists adjuster_fee_percent numeric(5,2);
+alter table public.contracts add column if not exists fee_notes text;
+alter table public.contracts add column if not exists consent_personal_info boolean not null default false;
+alter table public.contracts add column if not exists consent_required_terms boolean not null default false;
+alter table public.contracts add column if not exists signature_data_url text;
 
 create or replace function public.set_updated_at()
 returns trigger

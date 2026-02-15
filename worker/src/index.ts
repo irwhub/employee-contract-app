@@ -8,6 +8,9 @@ interface Env {
   GOOGLE_DRIVE_FOLDER_ID: string;
   GOOGLE_SHEET_ID: string;
   GOOGLE_SHEET_TAB_NAME?: string;
+  GOOGLE_TEMPLATE_ADJUSTER_DOC_ID?: string;
+  GOOGLE_TEMPLATE_ADMIN_DOC_ID?: string;
+  GOOGLE_TEMPLATE_COMBINED_DOC_ID?: string;
   AUTH_PASSWORD_PEPPER: string;
 }
 
@@ -37,6 +40,17 @@ function normalizeDob(input: string): string | null {
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     return raw;
+  }
+
+  if (/^\d{8}$/.test(raw)) {
+    const year = Number(raw.slice(0, 4));
+    const mm = Number(raw.slice(4, 6));
+    const dd = Number(raw.slice(6, 8));
+    const date = new Date(Date.UTC(year, mm - 1, dd));
+    const valid =
+      date.getUTCFullYear() === year && date.getUTCMonth() === mm - 1 && date.getUTCDate() === dd;
+    if (!valid) return null;
+    return `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
   }
 
   if (!/^\d{6}$/.test(raw)) {
@@ -97,7 +111,8 @@ async function getGoogleAccessToken(env: Env) {
       aud: 'https://oauth2.googleapis.com/token',
       iat: now,
       exp: now + 3600,
-      scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets'
+      scope:
+        'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/documents'
     },
     sa.private_key
   );
@@ -171,7 +186,7 @@ async function handleLogin(req: Request, env: Env) {
     return json({ error: 'name, dob, pin is required.' }, 400);
   }
   if (!normalizedDob) {
-    return json({ error: 'dob must be YYMMDD format.' }, 400);
+    return json({ error: 'dob must be YYYY-MM-DD format (or YYYYMMDD).' }, 400);
   }
   if (!/^\d{4}$/.test(body.pin)) {
     return json({ error: 'PIN must be 4 digits.' }, 400);
@@ -294,7 +309,7 @@ async function appendToSheet(env: Env, googleToken: string, row: string[]) {
   return payload.updates?.updatedRange || null;
 }
 
-async function createDriveFile(env: Env, googleToken: string, filename: string, dataText: string) {
+async function createDriveJsonFile(env: Env, googleToken: string, filename: string, dataText: string) {
   const boundary = `boundary_${crypto.randomUUID()}`;
   const metadata = {
     name: filename,
@@ -329,6 +344,147 @@ async function createDriveFile(env: Env, googleToken: string, filename: string, 
 
   const payload = (await res.json()) as { id: string; webViewLink?: string };
   return payload;
+}
+
+function pickTemplateDocId(env: Env, contractType: string) {
+  if (contractType === '손해사정사') return env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID;
+  if (contractType === '행정사') return env.GOOGLE_TEMPLATE_ADMIN_DOC_ID;
+  if (contractType === '손해사정사+행정사')
+    return env.GOOGLE_TEMPLATE_COMBINED_DOC_ID || env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID;
+  return env.GOOGLE_TEMPLATE_COMBINED_DOC_ID || env.GOOGLE_TEMPLATE_ADJUSTER_DOC_ID || env.GOOGLE_TEMPLATE_ADMIN_DOC_ID;
+}
+
+function toText(value: unknown) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'boolean') return value ? '예' : '아니오';
+  return String(value);
+}
+
+function createPlaceholderMap(contract: Record<string, unknown>) {
+  return {
+    employee_name: toText(contract.employee_name),
+    contract_type: toText(contract.contract_type),
+    customer_name: toText(contract.customer_name),
+    victim_or_insured: toText(contract.victim_or_insured),
+    beneficiary_name: toText(contract.beneficiary_name),
+    customer_gender: toText(contract.customer_gender),
+    customer_phone: toText(contract.customer_phone),
+    customer_dob: toText(contract.customer_dob),
+    customer_address: toText(contract.customer_address),
+    relation_to_party: toText(contract.relation_to_party),
+    accident_date: toText(contract.accident_date),
+    accident_location: toText(contract.accident_location),
+    accident_summary: toText(contract.accident_summary),
+    upfront_fee_ten_thousand: toText(contract.upfront_fee_ten_thousand),
+    admin_fee_percent: toText(contract.admin_fee_percent),
+    adjuster_fee_percent: toText(contract.adjuster_fee_percent),
+    fee_notes: toText(contract.fee_notes),
+    content: toText(contract.content),
+    consent_personal_info: toText(contract.consent_personal_info),
+    consent_required_terms: toText(contract.consent_required_terms),
+    delegation_auto_insurance: toText(contract.delegation_auto_insurance),
+    delegation_personal_insurance: toText(contract.delegation_personal_insurance),
+    delegation_workers_comp: toText(contract.delegation_workers_comp),
+    delegation_disability_pension: toText(contract.delegation_disability_pension),
+    delegation_employer_liability: toText(contract.delegation_employer_liability),
+    delegation_school_safety: toText(contract.delegation_school_safety),
+    delegation_other: toText(contract.delegation_other),
+    delegation_other_text: toText(contract.delegation_other_text),
+    now_date: new Date().toISOString().slice(0, 10)
+  };
+}
+
+async function copyGoogleDocTemplate(googleToken: string, templateDocId: string, title: string) {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${templateDocId}/copy?fields=id,name`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${googleToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ name: title })
+  });
+  if (!res.ok) throw new Error(`Template copy failed: ${await res.text()}`);
+  return (await res.json()) as { id: string; name: string };
+}
+
+async function replacePlaceholdersInDoc(
+  googleToken: string,
+  documentId: string,
+  map: Record<string, string>
+) {
+  const requests = Object.entries(map).map(([key, value]) => ({
+    replaceAllText: {
+      containsText: { text: `{{${key}}}`, matchCase: true },
+      replaceText: value
+    }
+  }));
+
+  const res = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${googleToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ requests })
+  });
+  if (!res.ok) throw new Error(`Docs placeholder replace failed: ${await res.text()}`);
+}
+
+async function exportGoogleDocPdf(googleToken: string, documentId: string) {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${documentId}/export?mimeType=application/pdf`,
+    { headers: { Authorization: `Bearer ${googleToken}` } }
+  );
+  if (!res.ok) throw new Error(`PDF export failed: ${await res.text()}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+function concatBytes(parts: Uint8Array[]) {
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+
+async function uploadPdfToDrive(
+  env: Env,
+  googleToken: string,
+  filename: string,
+  pdfBytes: Uint8Array
+) {
+  const boundary = `boundary_${crypto.randomUUID()}`;
+  const encoder = new TextEncoder();
+  const metadata = {
+    name: filename,
+    parents: [env.GOOGLE_DRIVE_FOLDER_ID],
+    mimeType: 'application/pdf'
+  };
+
+  const head = encoder.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(
+      metadata
+    )}\r\n--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`
+  );
+  const tail = encoder.encode(`\r\n--${boundary}--`);
+  const body = concatBytes([head, pdfBytes, tail]);
+
+  const res = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,name',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${googleToken}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`
+      },
+      body
+    }
+  );
+  if (!res.ok) throw new Error(`PDF upload failed: ${await res.text()}`);
+  return (await res.json()) as { id: string; webViewLink?: string; name?: string };
 }
 
 async function handleGoogleSync(req: Request, env: Env) {
@@ -398,11 +554,29 @@ async function handleGoogleSync(req: Request, env: Env) {
   ];
   const updatedRange = await appendToSheet(env, googleToken, row);
 
-  const driveFile = await createDriveFile(
+  const templateDocId = pickTemplateDocId(env, String(contract.contract_type || ''));
+  if (!templateDocId) {
+    return json(
+      {
+        error:
+          'Google template document ID is missing. Set GOOGLE_TEMPLATE_ADJUSTER_DOC_ID / GOOGLE_TEMPLATE_ADMIN_DOC_ID.'
+      },
+      500
+    );
+  }
+
+  const docCopy = await copyGoogleDocTemplate(
+    googleToken,
+    templateDocId,
+    `계약서_${contract.customer_name || contract.id}_${new Date().toISOString().slice(0, 10)}`
+  );
+  await replacePlaceholdersInDoc(googleToken, docCopy.id, createPlaceholderMap(contract));
+  const pdfBytes = await exportGoogleDocPdf(googleToken, docCopy.id);
+  const pdfFile = await uploadPdfToDrive(
     env,
     googleToken,
-    `contract_${contract.id}.json`,
-    JSON.stringify(contract, null, 2)
+    `contract_${contract.id}.pdf`,
+    pdfBytes
   );
 
   const rowMatch = updatedRange?.match(/!(?:[A-Z]+)(\d+):/);
@@ -417,17 +591,80 @@ async function handleGoogleSync(req: Request, env: Env) {
       Prefer: 'return=minimal'
     },
     body: JSON.stringify({
-      drive_file_id: driveFile.id,
+      drive_file_id: pdfFile.id,
       sheet_row_id: rowId
     })
   });
 
   return json({
     ok: true,
-    drive_file_id: driveFile.id,
-    drive_link: driveFile.webViewLink || `https://drive.google.com/file/d/${driveFile.id}/view`,
+    drive_file_id: pdfFile.id,
+    drive_link: pdfFile.webViewLink || `https://drive.google.com/file/d/${pdfFile.id}/view`,
     sheet_row: rowId,
     updated_range: updatedRange
+  });
+}
+
+async function handleContractPdfDownload(req: Request, env: Env, contractId: string) {
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return json({ error: 'Authorization Bearer token is required.' }, 401);
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  const user = await getUserFromAccessToken(env, token);
+  const employee = await getEmployeeByAuthUserId(env, user.id);
+  if (!employee || !employee.is_active) {
+    return json({ error: 'inactive employee or no permission.' }, 403);
+  }
+
+  const contractRes = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/contracts?id=eq.${contractId}&select=id,created_by,drive_file_id,customer_name`,
+    {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`
+      }
+    }
+  );
+  const contracts = (await contractRes.json()) as Array<{
+    id: string;
+    created_by: string;
+    drive_file_id: string | null;
+    customer_name: string | null;
+  }>;
+  const contract = contracts[0];
+  if (!contract) return json({ error: 'contract not found.' }, 404);
+
+  const isOwner = contract.created_by === user.id;
+  const isAdmin = employee.role === 'admin';
+  if (!isOwner && !isAdmin) {
+    return json({ error: 'only owner or admin can download this contract.' }, 403);
+  }
+  if (!contract.drive_file_id) {
+    return json({ error: 'PDF not generated yet. Save contract first.' }, 400);
+  }
+
+  const googleToken = await getGoogleAccessToken(env);
+  const pdfRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${contract.drive_file_id}?alt=media`,
+    {
+      headers: { Authorization: `Bearer ${googleToken}` }
+    }
+  );
+  if (!pdfRes.ok) {
+    return json({ error: `PDF download failed: ${await pdfRes.text()}` }, 500);
+  }
+
+  const filenameBase = contract.customer_name || contract.id;
+  return new Response(await pdfRes.arrayBuffer(), {
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(
+        `contract_${filenameBase}.pdf`
+      )}`
+    }
   });
 }
 
@@ -457,6 +694,13 @@ export default {
 
       if (url.pathname === '/integrations/google/sync' && req.method === 'POST') {
         return await handleGoogleSync(req, env);
+      }
+
+      if (req.method === 'GET') {
+        const pdfMatch = url.pathname.match(/^\/contracts\/([0-9a-fA-F-]+)\/pdf$/);
+        if (pdfMatch?.[1]) {
+          return await handleContractPdfDownload(req, env, pdfMatch[1]);
+        }
       }
 
       return json({ error: 'Not Found' }, 404);

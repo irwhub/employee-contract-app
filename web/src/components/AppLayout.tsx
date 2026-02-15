@@ -15,8 +15,8 @@ export function AppLayout({ profile }: AppLayoutProps) {
   };
 
   const menu = [
-    { to: '/contracts', label: '내 계약서' },
     { to: '/contracts/new', label: '새 계약서' },
+    { to: '/contracts', label: '내 계약서' },
     ...(profile.role === 'admin' ? [{ to: '/admin', label: '관리자' }] : [])
   ];
 
@@ -24,7 +24,7 @@ export function AppLayout({ profile }: AppLayoutProps) {
     <div className="min-h-screen bg-slate-50">
       <header className="bg-gradient-to-r from-brand-600 to-brand-500 text-white shadow-lg">
         <div className="mx-auto flex w-full max-w-4xl items-center justify-between px-4 py-4">
-          <Link to="/contracts" className="text-base font-bold sm:text-lg">
+          <Link to="/contracts/new" className="text-base font-bold sm:text-lg">
             이로운 손해사정 행정사 계약서 작성
           </Link>
           <div className="flex items-center gap-2 text-sm">

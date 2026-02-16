@@ -4,7 +4,7 @@ import { Card } from '../components/Card';
 import { GhostButton, Label, PrimaryButton, TextArea, TextInput } from '../components/FormControls';
 import { SignaturePad } from '../components/SignaturePad';
 import { supabase, type Contract, type EmployeeProfile } from '../lib/supabase';
-import { ensureValidAccessToken } from '../lib/session';
+import { clearAuthState, ensureValidAccessToken } from '../lib/session';
 
 const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
 const CONTRACT_TYPE_OPTIONS = ['손해사정사', '행정사', '손해사정사+행정사'] as const;
@@ -50,6 +50,16 @@ function toUserFriendlyError(error: unknown, fallback = '처리 중 오류가 �
     return '구글 드라이브 접근 권한 확인이 필요합니다. 관리자에게 문의해주세요.';
   }
   return typeof error === 'string' && error ? error : fallback;
+}
+
+function isSessionExpiredError(error: unknown) {
+  const raw = typeof error === 'string' ? error : error instanceof Error ? error.message : JSON.stringify(error || '');
+  return (
+    raw.includes('세션이 만료') ||
+    raw.includes('UNAUTHENTICATED') ||
+    raw.includes('Invalid access token') ||
+    raw.includes('authError')
+  );
 }
 
 export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
@@ -173,8 +183,15 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     try {
       accessToken = await getAccessTokenOrThrow();
     } catch (err) {
+      setMessage(null);
       if (!options?.suppressUiError) {
         setError(err instanceof Error ? err.message : '세션이 만료되었습니다. 다시 로그인 해주세요.');
+      }
+      if (isSessionExpiredError(err)) {
+        clearAuthState();
+        setTimeout(() => {
+          navigate('/contracts/new');
+        }, 200);
       }
       setSyncing(false);
       return { ok: false, error: err instanceof Error ? err.message : 'token error' };
@@ -197,6 +214,13 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       if (!options?.suppressUiError) {
         setError(toUserFriendlyError(err, '동기화 실패'));
       }
+      setMessage(null);
+      if (isSessionExpiredError(err)) {
+        clearAuthState();
+        setTimeout(() => {
+          navigate('/contracts/new');
+        }, 200);
+      }
       setSyncing(false);
       return { ok: false, error: toUserFriendlyError(err, '동기화 실패') };
     }
@@ -214,6 +238,13 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     if (!res.ok) {
       if (!options?.suppressUiError) {
         setError(toUserFriendlyError(payload.error, '동기화 실패'));
+      }
+      setMessage(null);
+      if (isSessionExpiredError(payload.error)) {
+        clearAuthState();
+        setTimeout(() => {
+          navigate('/contracts/new');
+        }, 200);
       }
       setSyncing(false);
       return { ok: false, error: toUserFriendlyError(payload.error, 'sync failed') };
@@ -256,7 +287,14 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     try {
       accessToken = await getAccessTokenOrThrow();
     } catch (err) {
+      setMessage(null);
       setError(err instanceof Error ? err.message : '세션이 만료되었습니다. 다시 로그인 해주세요.');
+      if (isSessionExpiredError(err)) {
+        clearAuthState();
+        setTimeout(() => {
+          navigate('/contracts/new');
+        }, 200);
+      }
       return;
     }
 
@@ -264,6 +302,12 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       const syncResult = await onSync(contract.id, { suppressUiSuccess: true });
       if (!syncResult.ok) {
         setMessage(null);
+        if (isSessionExpiredError(syncResult.error)) {
+          clearAuthState();
+          setTimeout(() => {
+            navigate('/contracts/new');
+          }, 200);
+        }
         return;
       }
     }
@@ -298,6 +342,12 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       const payload = await res.json().catch(() => ({}));
       setError(toUserFriendlyError(payload.error, 'PDF 다운로드에 실패했습니다.'));
       setMessage(null);
+      if (isSessionExpiredError(payload.error)) {
+        clearAuthState();
+        setTimeout(() => {
+          navigate('/contracts/new');
+        }, 200);
+      }
       return;
     }
 

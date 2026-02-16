@@ -4,6 +4,7 @@ const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
 const FALLBACK_SESSION_KEY = 'employee_session_fallback';
+const FALLBACK_PROFILE_KEY = 'employee_profile_fallback';
 
 export interface StoredSession {
   access_token: string;
@@ -94,6 +95,7 @@ export async function persistFallbackSession(session: StoredSession) {
 
 export function clearAuthState() {
   localStorage.removeItem(FALLBACK_SESSION_KEY);
+  localStorage.removeItem(FALLBACK_PROFILE_KEY);
   const projectStorageKey = buildProjectStorageKey();
   if (projectStorageKey) {
     localStorage.removeItem(projectStorageKey);

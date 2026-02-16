@@ -1,4 +1,4 @@
-ï»¿import { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Card } from '../components/Card';
 import { GhostButton, Label, PrimaryButton, TextArea, TextInput } from '../components/FormControls';
@@ -7,16 +7,16 @@ import { supabase, type Contract, type EmployeeProfile } from '../lib/supabase';
 import { clearAuthState, ensureValidAccessToken } from '../lib/session';
 
 const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
-const CONTRACT_TYPE_OPTIONS = ['ì†í•´ì‚¬ì •ì‚¬', 'í–‰ì •ì‚¬', 'ì†í•´ì‚¬ì •ì‚¬+í–‰ì •ì‚¬'] as const;
-const RELATION_OPTIONS = ['ë³¸ì¸', 'ë°°ìš°ì', 'ë¶€ëª¨', 'ìë…€', 'ê¸°íƒ€'] as const;
+const CONTRACT_TYPE_OPTIONS = ['¼ÕÇØ»çÁ¤»ç', 'ÇàÁ¤»ç', '¼ÕÇØ»çÁ¤»ç+ÇàÁ¤»ç'] as const;
+const RELATION_OPTIONS = ['º»ÀÎ', '¹è¿ìÀÚ', 'ºÎ¸ğ', 'ÀÚ³à', '±âÅ¸'] as const;
 const DELEGATION_OPTIONS = [
-  { key: 'delegation_auto_insurance', label: 'ìë™ì°¨ë³´í—˜' },
-  { key: 'delegation_personal_insurance', label: 'ê°œì¸ë³´í—˜(ìƒëª… ìƒí•´ ë“±)' },
-  { key: 'delegation_workers_comp', label: 'ì‚°ì¬ë³´í—˜' },
-  { key: 'delegation_disability_pension', label: 'êµ­ê°€ì¥ì• /êµ­ë¯¼ì—°ê¸ˆì¥í•´' },
-  { key: 'delegation_employer_liability', label: 'ê·¼ì¬ë³´í—˜' },
-  { key: 'delegation_school_safety', label: 'í•™êµì•ˆì „ê³µì œíšŒ' },
-  { key: 'delegation_other', label: 'ê¸°íƒ€' }
+  { key: 'delegation_auto_insurance', label: 'ÀÚµ¿Â÷º¸Çè' },
+  { key: 'delegation_personal_insurance', label: '°³ÀÎº¸Çè(»ı¸í »óÇØ µî)' },
+  { key: 'delegation_workers_comp', label: '»êÀçº¸Çè' },
+  { key: 'delegation_disability_pension', label: '±¹°¡Àå¾Ö/±¹¹Î¿¬±İÀåÇØ' },
+  { key: 'delegation_employer_liability', label: '±ÙÀçº¸Çè' },
+  { key: 'delegation_school_safety', label: 'ÇĞ±³¾ÈÀü°øÁ¦È¸' },
+  { key: 'delegation_other', label: '±âÅ¸' }
 ] as const;
 const SYNC_TIMEOUT_MS = 30000;
 
@@ -36,7 +36,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
-function toUserFriendlyError(error: unknown, fallback = 'ì²˜ë¦¬ ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.') {
+function toUserFriendlyError(error: unknown, fallback = 'Ã³¸® Áß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù.') {
   const raw = typeof error === 'string' ? error : JSON.stringify(error || '');
   if (
     raw.includes('UNAUTHENTICATED') ||
@@ -44,10 +44,10 @@ function toUserFriendlyError(error: unknown, fallback = 'ì²˜ë¦¬ ì¤‘ ì˜¤ë¥˜ê°€ ë°
     raw.includes('authError') ||
     raw.includes('Invalid access token')
   ) {
-    return 'ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.';
+    return '¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.';
   }
   if (raw.includes('Drive folder lookup failed')) {
-    return 'êµ¬ê¸€ ë“œë¼ì´ë¸Œ ì ‘ê·¼ ê¶Œí•œ í™•ì¸ì´ í•„ìš”í•©ë‹ˆë‹¤. ê´€ë¦¬ìì—ê²Œ ë¬¸ì˜í•´ì£¼ì„¸ìš”.';
+    return '±¸±Û µå¶óÀÌºê Á¢±Ù ±ÇÇÑ È®ÀÎÀÌ ÇÊ¿äÇÕ´Ï´Ù. °ü¸®ÀÚ¿¡°Ô ¹®ÀÇÇØÁÖ¼¼¿ä.';
   }
   return typeof error === 'string' && error ? error : fallback;
 }
@@ -55,7 +55,7 @@ function toUserFriendlyError(error: unknown, fallback = 'ì²˜ë¦¬ ì¤‘ ì˜¤ë¥˜ê°€ ë°
 function isSessionExpiredError(error: unknown) {
   const raw = typeof error === 'string' ? error : error instanceof Error ? error.message : JSON.stringify(error || '');
   return (
-    raw.includes('ì„¸ì…˜ì´ ë§Œë£Œ') ||
+    raw.includes('¼¼¼ÇÀÌ ¸¸·á') ||
     raw.includes('UNAUTHENTICATED') ||
     raw.includes('Invalid access token') ||
     raw.includes('authError')
@@ -85,7 +85,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
   const getAccessTokenOrThrow = async () => {
     const session = await ensureValidAccessToken();
     if (!session) {
-      throw new Error('ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+      throw new Error('¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.');
     }
     return session;
   };
@@ -158,7 +158,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       setSaving(false);
       setIsEditing(false);
       setOriginalContract(contract);
-      setMessage(syncResult.error ? `ì €ì¥ì€ ì™„ë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ${syncResult.error}` : 'ì €ì¥ì€ ì™„ë£Œë˜ì—ˆìŠµë‹ˆë‹¤. PDF ìë™ ìƒì„±ì€ ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.');
+      setMessage(syncResult.error ? `ÀúÀåÀº ¿Ï·áµÇ¾ú½À´Ï´Ù. ${syncResult.error}` : 'ÀúÀåÀº ¿Ï·áµÇ¾ú½À´Ï´Ù. PDF ÀÚµ¿ »ı¼ºÀº ½ÇÆĞÇß½À´Ï´Ù.');
       return;
     }
 
@@ -166,7 +166,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     setSaving(false);
     setIsEditing(false);
     setOriginalContract(contract);
-    setMessage('ì €ì¥ ë° PDF ë‹¤ìš´ë¡œë“œê°€ ì™„ë£Œë˜ì—ˆìŠµë‹ˆë‹¤.');
+    setMessage('ÀúÀå ¹× PDF ´Ù¿î·Îµå°¡ ¿Ï·áµÇ¾ú½À´Ï´Ù.');
   };
 
   const onSync = async (
@@ -185,12 +185,12 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     } catch (err) {
       setMessage(null);
       if (!options?.suppressUiError) {
-        setError(err instanceof Error ? err.message : 'ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+        setError(err instanceof Error ? err.message : '¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.');
       }
       if (isSessionExpiredError(err)) {
         clearAuthState();
         setTimeout(() => {
-          navigate('/contracts/new');
+          navigate('/');
         }, 200);
       }
       setSyncing(false);
@@ -209,26 +209,26 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
 
     let res: Response;
     try {
-      res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, 'ë™ê¸°í™” ìš”ì²­ì´ ì§€ì—°ë˜ì—ˆìŠµë‹ˆë‹¤.');
+      res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, 'µ¿±âÈ­ ¿äÃ»ÀÌ Áö¿¬µÇ¾ú½À´Ï´Ù.');
     } catch (err) {
       if (!options?.suppressUiError) {
-        setError(toUserFriendlyError(err, 'ë™ê¸°í™” ì‹¤íŒ¨'));
+        setError(toUserFriendlyError(err, 'µ¿±âÈ­ ½ÇÆĞ'));
       }
       setMessage(null);
       if (isSessionExpiredError(err)) {
         clearAuthState();
         setTimeout(() => {
-          navigate('/contracts/new');
+          navigate('/');
         }, 200);
       }
       setSyncing(false);
-      return { ok: false, error: toUserFriendlyError(err, 'ë™ê¸°í™” ì‹¤íŒ¨') };
+      return { ok: false, error: toUserFriendlyError(err, 'µ¿±âÈ­ ½ÇÆĞ') };
     }
 
     if (res.status === 401) {
       try {
         accessToken = await getAccessTokenOrThrow();
-        res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, 'ë™ê¸°í™” ìš”ì²­ì´ ì§€ì—°ë˜ì—ˆìŠµë‹ˆë‹¤.');
+        res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, 'µ¿±âÈ­ ¿äÃ»ÀÌ Áö¿¬µÇ¾ú½À´Ï´Ù.');
       } catch {
         // handled by res error below
       }
@@ -237,20 +237,20 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
       if (!options?.suppressUiError) {
-        setError(toUserFriendlyError(payload.error, 'ë™ê¸°í™” ì‹¤íŒ¨'));
+        setError(toUserFriendlyError(payload.error, 'µ¿±âÈ­ ½ÇÆĞ'));
       }
       setMessage(null);
       if (isSessionExpiredError(payload.error)) {
         clearAuthState();
         setTimeout(() => {
-          navigate('/contracts/new');
+          navigate('/');
         }, 200);
       }
       setSyncing(false);
       return { ok: false, error: toUserFriendlyError(payload.error, 'sync failed') };
     } else {
       if (!options?.suppressUiSuccess) {
-        setMessage('PDF ìƒì„± ë° ì €ì¥ì´ ì™„ë£Œë˜ì—ˆìŠµë‹ˆë‹¤.');
+        setMessage('PDF »ı¼º ¹× ÀúÀåÀÌ ¿Ï·áµÇ¾ú½À´Ï´Ù.');
       }
       const { data } = await supabase.from('contracts').select('*').eq('id', targetId).single();
       setContract(data as Contract);
@@ -268,7 +268,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
 
   const onDelete = async () => {
     if (!contract) return;
-    if (!confirm('ì •ë§ ì‚­ì œí•˜ì‹œê² ìŠµë‹ˆê¹Œ?')) return;
+    if (!confirm('Á¤¸» »èÁ¦ÇÏ½Ã°Ú½À´Ï±î?')) return;
 
     const { error: dbError } = await supabase.from('contracts').delete().eq('id', contract.id);
     if (dbError) {
@@ -281,18 +281,18 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
   const onDownloadPdf = async (options?: { skipSync?: boolean }) => {
     if (!contract?.id) return;
     setError(null);
-    setMessage('ìµœì‹  ê³„ì•½ì„œ PDFë¥¼ ì¤€ë¹„ ì¤‘ì…ë‹ˆë‹¤...');
+    setMessage('ÃÖ½Å °è¾à¼­ PDF¸¦ ÁØºñ ÁßÀÔ´Ï´Ù...');
 
     let accessToken = '';
     try {
       accessToken = await getAccessTokenOrThrow();
     } catch (err) {
       setMessage(null);
-      setError(err instanceof Error ? err.message : 'ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+      setError(err instanceof Error ? err.message : '¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.');
       if (isSessionExpiredError(err)) {
         clearAuthState();
         setTimeout(() => {
-          navigate('/contracts/new');
+          navigate('/');
         }, 200);
       }
       return;
@@ -305,7 +305,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         if (isSessionExpiredError(syncResult.error)) {
           clearAuthState();
           setTimeout(() => {
-            navigate('/contracts/new');
+            navigate('/');
           }, 200);
         }
         return;
@@ -322,9 +322,9 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
 
     let res: Response;
     try {
-      res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF ë‹¤ìš´ë¡œë“œê°€ ì§€ì—°ë˜ì—ˆìŠµë‹ˆë‹¤.');
+      res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF ´Ù¿î·Îµå°¡ Áö¿¬µÇ¾ú½À´Ï´Ù.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'PDF ë‹¤ìš´ë¡œë“œê°€ ì§€ì—°ë˜ì—ˆìŠµë‹ˆë‹¤.');
+      setError(err instanceof Error ? err.message : 'PDF ´Ù¿î·Îµå°¡ Áö¿¬µÇ¾ú½À´Ï´Ù.');
       setMessage(null);
       return;
     }
@@ -332,7 +332,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     if (res.status === 401) {
       try {
         accessToken = await getAccessTokenOrThrow();
-        res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF ë‹¤ìš´ë¡œë“œê°€ ì§€ì—°ë˜ì—ˆìŠµë‹ˆë‹¤.');
+        res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF ´Ù¿î·Îµå°¡ Áö¿¬µÇ¾ú½À´Ï´Ù.');
       } catch {
         // handled by response error below
       }
@@ -340,12 +340,12 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
 
     if (!res.ok) {
       const payload = await res.json().catch(() => ({}));
-      setError(toUserFriendlyError(payload.error, 'PDF ë‹¤ìš´ë¡œë“œì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤.'));
+      setError(toUserFriendlyError(payload.error, 'PDF ´Ù¿î·Îµå¿¡ ½ÇÆĞÇß½À´Ï´Ù.'));
       setMessage(null);
       if (isSessionExpiredError(payload.error)) {
         clearAuthState();
         setTimeout(() => {
-          navigate('/contracts/new');
+          navigate('/');
         }, 200);
       }
       return;
@@ -360,25 +360,25 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
     a.click();
     a.remove();
     window.URL.revokeObjectURL(url);
-    setMessage('PDF ë‹¤ìš´ë¡œë“œê°€ ì™„ë£Œë˜ì—ˆìŠµë‹ˆë‹¤.');
+    setMessage('PDF ´Ù¿î·Îµå°¡ ¿Ï·áµÇ¾ú½À´Ï´Ù.');
   };
 
-  if (loading) return <p className="text-sm text-slate-500">ë¶ˆëŸ¬ì˜¤ëŠ” ì¤‘...</p>;
-  if (!contract) return <p className="text-sm text-red-600">ê³„ì•½ì„œë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.</p>;
+  if (loading) return <p className="text-sm text-slate-500">ºÒ·¯¿À´Â Áß...</p>;
+  if (!contract) return <p className="text-sm text-red-600">°è¾à¼­¸¦ Ã£À» ¼ö ¾ø½À´Ï´Ù.</p>;
 
   const canEdit = profile.role === 'admin' || contract.created_by === profile.auth_user_id;
   const canEditNow = canEdit && isEditing;
 
   return (
     <form className="space-y-4" onSubmit={onSave}>
-      <Card title="ê³„ì•½ ìƒì„¸">
+      <Card title="°è¾à »ó¼¼">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <Label text="ì§ì›ëª…" />
+            <Label text="Á÷¿ø¸í" />
             <TextInput value={contract.employee_name} readOnly />
           </div>
           <div>
-            <Label text="ê³„ì•½ ìœ í˜•" />
+            <Label text="°è¾à À¯Çü" />
             <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
               {CONTRACT_TYPE_OPTIONS.map((option) => (
                 <label key={option} className="flex items-center gap-2 text-sm text-slate-700">
@@ -396,7 +396,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             </div>
           </div>
           <div>
-            <Label text="ê³ ê°ëª…" />
+            <Label text="°í°´¸í" />
             <TextInput
               value={contract.customer_name}
               onChange={(e) => setContract({ ...contract, customer_name: e.target.value })}
@@ -404,7 +404,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="í”¼í•´ì/í”¼ë³´í—˜ì" />
+            <Label text="ÇÇÇØÀÚ/ÇÇº¸ÇèÀÚ" />
             <TextInput
               value={contract.victim_or_insured || ''}
               onChange={(e) => setContract({ ...contract, victim_or_insured: e.target.value })}
@@ -412,7 +412,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="ìˆ˜ìµì ì´ë¦„" />
+            <Label text="¼öÀÍÀÚ ÀÌ¸§" />
             <TextInput
               value={contract.beneficiary_name || ''}
               onChange={(e) => setContract({ ...contract, beneficiary_name: e.target.value })}
@@ -420,9 +420,9 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="ì„±ë³„" />
+            <Label text="¼ºº°" />
             <div className="flex gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
-              {['ë‚¨ì„±', 'ì—¬ì„±'].map((gender) => (
+              {['³²¼º', '¿©¼º'].map((gender) => (
                 <label key={gender} className="flex items-center gap-2 text-slate-700">
                   <input
                     type="radio"
@@ -438,7 +438,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             </div>
           </div>
           <div>
-            <Label text="ì—°ë½ì²˜" />
+            <Label text="¿¬¶ôÃ³" />
             <TextInput
               value={contract.customer_phone || ''}
               onChange={(e) => setContract({ ...contract, customer_phone: e.target.value })}
@@ -446,7 +446,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="ìƒë…„ì›”ì¼" />
+            <Label text="»ı³â¿ùÀÏ" />
             <TextInput
               type="text"
               inputMode="numeric"
@@ -460,7 +460,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div className="sm:col-span-2">
-            <Label text="ì£¼ì†Œ" />
+            <Label text="ÁÖ¼Ò" />
             <TextInput
               value={contract.customer_address || ''}
               onChange={(e) => setContract({ ...contract, customer_address: e.target.value })}
@@ -468,14 +468,14 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div className="sm:col-span-2">
-            <Label text="ì‚¬ê³  ë‹¹ì‚¬ìì™€ì˜ ê´€ê³„" />
+            <Label text="»ç°í ´ç»çÀÚ¿ÍÀÇ °ü°è" />
             <select
               value={contract.relation_to_party || ''}
               onChange={(e) => setContract({ ...contract, relation_to_party: e.target.value })}
               disabled={!canEditNow}
               className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm"
             >
-              <option value="">ì„ íƒí•˜ì„¸ìš”</option>
+              <option value="">¼±ÅÃÇÏ¼¼¿ä</option>
               {RELATION_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -486,17 +486,17 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         </div>
       </Card>
 
-      <Card title="ì‚¬ê³  ê¸°ë³¸ì •ë³´">
+      <Card title="»ç°í ±âº»Á¤º¸">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <Label text="ì‚¬ê³ ë°œìƒì¼" />
+            <Label text="»ç°í¹ß»ıÀÏ" />
             <TextInput
               type="text"
               inputMode="numeric"
               pattern="\d{4}-\d{2}-\d{2}"
               maxLength={10}
               value={contract.accident_date || ''}
-              placeholder="ì˜ˆ: 1992-08-12"
+              placeholder="¿¹: 1992-08-12"
               onChange={(e) =>
                 setContract({ ...contract, accident_date: formatYmd(e.target.value) })
               }
@@ -504,7 +504,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="ì‚¬ê³ ë°œìƒì¥ì†Œ" />
+            <Label text="»ç°í¹ß»ıÀå¼Ò" />
             <TextInput
               value={contract.accident_location || ''}
               onChange={(e) => setContract({ ...contract, accident_location: e.target.value })}
@@ -512,7 +512,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div className="sm:col-span-2">
-            <Label text="ì‚¬ê³ ì˜ ê°„ë‹¨í•œ ê°œìš”" />
+            <Label text="»ç°íÀÇ °£´ÜÇÑ °³¿ä" />
             <TextArea
               value={contract.accident_summary || ''}
               onChange={(e) => setContract({ ...contract, accident_summary: e.target.value })}
@@ -522,7 +522,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         </div>
       </Card>
 
-      <Card title="ê´€ë ¨ ìœ„ì„ ì²´í¬ë¦¬ìŠ¤íŠ¸">
+      <Card title="°ü·Ã À§ÀÓ Ã¼Å©¸®½ºÆ®">
         <div className="grid gap-3 sm:grid-cols-2">
           {DELEGATION_OPTIONS.map((option) => (
             <label key={option.key} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
@@ -538,7 +538,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
           ))}
         </div>
         <div className="mt-3">
-          <Label text="ê¸°íƒ€ ë‚´ìš©" />
+          <Label text="±âÅ¸ ³»¿ë" />
           <TextInput
             value={contract.delegation_other_text || ''}
             onChange={(e) => setContract({ ...contract, delegation_other_text: e.target.value })}
@@ -547,10 +547,10 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         </div>
       </Card>
 
-      <Card title="ë³´ìˆ˜ ê´€ë ¨ í•­ëª© (ë¶€ê°€ì„¸ ë³„ë„)">
+      <Card title="º¸¼ö °ü·Ã Ç×¸ñ (ºÎ°¡¼¼ º°µµ)">
         <div className="grid gap-4 sm:grid-cols-3">
           <div>
-            <Label text="ì°©ìˆ˜ê¸ˆ (ë§Œì›)" />
+            <Label text="Âø¼ö±İ (¸¸¿ø)" />
             <TextInput
               type="number"
               min={0}
@@ -566,7 +566,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="í–‰ì •ì‚¬ (%)" />
+            <Label text="ÇàÁ¤»ç (%)" />
             <TextInput
               type="number"
               min={0}
@@ -583,7 +583,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             />
           </div>
           <div>
-            <Label text="ì†í•´ì‚¬ì •ì‚¬ (%)" />
+            <Label text="¼ÕÇØ»çÁ¤»ç (%)" />
             <TextInput
               type="number"
               min={0}
@@ -601,7 +601,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
           </div>
         </div>
         <div className="mt-3">
-          <Label text="ê¸°íƒ€ì‚¬í•­" />
+          <Label text="±âÅ¸»çÇ×" />
           <TextArea
             value={contract.fee_notes || ''}
             onChange={(e) => setContract({ ...contract, fee_notes: e.target.value })}
@@ -610,8 +610,8 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         </div>
       </Card>
 
-      <Card title="íŠ¹ì•½ì‚¬í•­">
-        <Label text="íŠ¹ì•½ì‚¬í•­" />
+      <Card title="Æ¯¾à»çÇ×">
+        <Label text="Æ¯¾à»çÇ×" />
         <TextArea
           value={contract.content || ''}
           onChange={(e) => setContract({ ...contract, content: e.target.value })}
@@ -619,7 +619,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         />
       </Card>
 
-      <Card title="í•„ìˆ˜ ë™ì˜ ì²´í¬">
+      <Card title="ÇÊ¼ö µ¿ÀÇ Ã¼Å©">
         <label className="flex items-center gap-2 text-sm text-slate-700">
           <input
             type="checkbox"
@@ -627,7 +627,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             onChange={(e) => setContract({ ...contract, consent_personal_info: e.target.checked })}
             disabled={!canEditNow}
           />
-          ê°œì¸ì •ë³´ ì´ìš©ì— ë™ì˜í•©ë‹ˆë‹¤.
+          °³ÀÎÁ¤º¸ ÀÌ¿ë¿¡ µ¿ÀÇÇÕ´Ï´Ù.
         </label>
         <label className="mt-2 flex items-center gap-2 text-sm text-slate-700">
           <input
@@ -636,11 +636,11 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             onChange={(e) => setContract({ ...contract, consent_required_terms: e.target.checked })}
             disabled={!canEditNow}
           />
-          ê³„ì•½ê³¼ ê´€ë ¨ëœ í•„ìˆ˜ì‚¬í•­ì— ë™ì˜í•©ë‹ˆë‹¤.
+          °è¾à°ú °ü·ÃµÈ ÇÊ¼ö»çÇ×¿¡ µ¿ÀÇÇÕ´Ï´Ù.
         </label>
       </Card>
 
-      <Card title="ì„œëª…">
+      <Card title="¼­¸í">
         <SignaturePad
           value={contract.signature_data_url}
           onChange={(value) => setContract({ ...contract, signature_data_url: value })}
@@ -649,9 +649,9 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       </Card>
 
       {profile.role === 'admin' && (
-        <Card title="Google ë™ê¸°í™” ê²°ê³¼">
-          <p className="text-sm text-slate-600">Drive íŒŒì¼ ID: {contract.drive_file_id || 'ì—†ìŒ'}</p>
-          <p className="text-sm text-slate-600">Sheet Row: {contract.sheet_row_id || 'ì—†ìŒ'}</p>
+        <Card title="Google µ¿±âÈ­ °á°ú">
+          <p className="text-sm text-slate-600">Drive ÆÄÀÏ ID: {contract.drive_file_id || '¾øÀ½'}</p>
+          <p className="text-sm text-slate-600">Sheet Row: {contract.sheet_row_id || '¾øÀ½'}</p>
           {contract.drive_file_id && (
             <a
               className="mt-2 inline-block text-sm text-brand-700 underline"
@@ -659,7 +659,7 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
               target="_blank"
               rel="noreferrer"
             >
-              Drive íŒŒì¼ ì—´ê¸°
+              Drive ÆÄÀÏ ¿­±â
             </a>
           )}
         </Card>
@@ -671,12 +671,12 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
       <div className="no-print flex flex-wrap gap-2">
         {canEditNow && (
           <PrimaryButton type="submit" loading={saving}>
-            ì €ì¥
+            ÀúÀå
           </PrimaryButton>
         )}
         {canEdit && !canEditNow && (
           <GhostButton type="button" onClick={() => setIsEditing(true)}>
-            ìˆ˜ì •
+            ¼öÁ¤
           </GhostButton>
         )}
         {canEditNow && (
@@ -687,20 +687,20 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
               setIsEditing(false);
             }}
           >
-            ì·¨ì†Œ
+            Ãë¼Ò
           </GhostButton>
         )}
         <GhostButton type="button" onClick={() => void onDownloadPdf()}>
-          ê³„ì•½ì„œ PDF ë‹¤ìš´ë¡œë“œ
+          °è¾à¼­ PDF ´Ù¿î·Îµå
         </GhostButton>
         {profile.role === 'admin' && (
           <GhostButton type="button" onClick={() => onSync()} disabled={syncing}>
-            {syncing ? 'ë™ê¸°í™” ì¤‘...' : 'Google ì¬ë™ê¸°í™”'}
+            {syncing ? 'µ¿±âÈ­ Áß...' : 'Google Àçµ¿±âÈ­'}
           </GhostButton>
         )}
         {canEdit && (
           <GhostButton type="button" onClick={onDelete}>
-            ì‚­ì œ
+            »èÁ¦
           </GhostButton>
         )}
       </div>

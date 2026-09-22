@@ -1,384 +1,599 @@
-import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+ï»¿import { useEffect, useState } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Card } from '../components/Card';
 import { GhostButton, Label, PrimaryButton, TextArea, TextInput } from '../components/FormControls';
 import { SignaturePad } from '../components/SignaturePad';
-import { supabase, type Contract, type EmployeeProfile } from '../lib/supabase';
-import { clearAuthState, ensureValidAccessToken } from '../lib/session';
+import { recoverContractTextMap } from '../lib/encoding';
+import type { Contract, ContractRecipientRequest, EmployeeProfile } from '../lib/supabase';
+import { clearAuthState, ensureValidAccessToken, normalizeSessionMessage } from '../lib/session';
 
 const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
-const CONTRACT_TYPE_OPTIONS = ['¼ÕÇØ»çÁ¤»ç', 'ÇàÁ¤»ç', '¼ÕÇØ»çÁ¤»ç+ÇàÁ¤»ç'] as const;
-const RELATION_OPTIONS = ['º»ÀÎ', '¹è¿ìÀÚ', 'ºÎ¸ğ', 'ÀÚ³à', '±âÅ¸'] as const;
+const REQUEST_TIMEOUT_MS = 120000;
+const PDF_SYNC_TIMEOUT_MS = 120000;
+
+const CONTRACT_TYPE_OPTIONS = ['ì†í•´ì‚¬ì •ì‚¬', 'í–‰ì •ì‚¬', 'ì†í•´ì‚¬ì •ì‚¬+í–‰ì •ì‚¬'] as const;
+const DEFAULT_CONTRACT_TYPE = 'ì†í•´ì‚¬ì •ì‚¬+í–‰ì •ì‚¬';
+const RELATION_OPTIONS = ['ë³¸ì¸', 'ë°°ìš°ì', 'ë¶€ëª¨', 'ìë…€', 'ê¸°íƒ€'] as const;
 const DELEGATION_OPTIONS = [
-  { key: 'delegation_auto_insurance', label: 'ÀÚµ¿Â÷º¸Çè' },
-  { key: 'delegation_personal_insurance', label: '°³ÀÎº¸Çè(»ı¸í »óÇØ µî)' },
-  { key: 'delegation_workers_comp', label: '»êÀçº¸Çè' },
-  { key: 'delegation_disability_pension', label: '±¹°¡Àå¾Ö/±¹¹Î¿¬±İÀåÇØ' },
-  { key: 'delegation_employer_liability', label: '±ÙÀçº¸Çè' },
-  { key: 'delegation_school_safety', label: 'ÇĞ±³¾ÈÀü°øÁ¦È¸' },
-  { key: 'delegation_other', label: '±âÅ¸' }
+  { key: 'autoInsurance', label: 'ìë™ì°¨ë³´í—˜' },
+  { key: 'personalInsurance', label: 'ê°œì¸ë³´í—˜(ìƒëª… ìƒí•´ ë“±)' },
+  { key: 'workersComp', label: 'ì‚°ì¬ë³´í—˜' },
+  { key: 'disabilityPension', label: 'êµ­ê°€ì¥ì• /êµ­ë¯¼ì—°ê¸ˆì¥í•´' },
+  { key: 'employerLiability', label: 'ê·¼ì¬ë³´í—˜' },
+  { key: 'schoolSafety', label: 'í•™êµì•ˆì „ê³µì œíšŒ' },
+  { key: 'other', label: 'ê¸°íƒ€' }
 ] as const;
-const SYNC_TIMEOUT_MS = 30000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  return Promise.race([
-    promise.finally(() => {
-      if (timer) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label)), ms);
+    Promise.resolve(promise).then(
+      (value) => {
         clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
       }
-    }),
-    new Promise<T>((_, reject) => {
-      timer = setTimeout(() => {
-        reject(new Error(label));
-      }, ms);
-    })
-  ]);
+    );
+  });
 }
 
-function toUserFriendlyError(error: unknown, fallback = 'Ã³¸® Áß ¿À·ù°¡ ¹ß»ıÇß½À´Ï´Ù.') {
-  const raw = typeof error === 'string' ? error : JSON.stringify(error || '');
-  if (
-    raw.includes('UNAUTHENTICATED') ||
-    raw.includes('Invalid Credentials') ||
-    raw.includes('authError') ||
-    raw.includes('Invalid access token')
-  ) {
-    return '¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.';
-  }
-  if (raw.includes('Drive folder lookup failed')) {
-    return '±¸±Û µå¶óÀÌºê Á¢±Ù ±ÇÇÑ È®ÀÎÀÌ ÇÊ¿äÇÕ´Ï´Ù. °ü¸®ÀÚ¿¡°Ô ¹®ÀÇÇØÁÖ¼¼¿ä.';
-  }
-  return typeof error === 'string' && error ? error : fallback;
+function toValidYmd(year: number, month: number, day: number): string | null {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const valid =
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+  if (!valid) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-function isSessionExpiredError(error: unknown) {
-  const raw = typeof error === 'string' ? error : error instanceof Error ? error.message : JSON.stringify(error || '');
-  return (
-    raw.includes('¼¼¼ÇÀÌ ¸¸·á') ||
-    raw.includes('UNAUTHENTICATED') ||
-    raw.includes('Invalid access token') ||
-    raw.includes('authError')
-  );
+function normalizeDateForApi(input: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const [y, m, d] = raw.split('-').map(Number);
+    return toValidYmd(y, m, d);
+  }
+
+  const digits = raw.replace(/\D/g, '');
+  if (/^\d{8}$/.test(digits)) {
+    const y = Number(digits.slice(0, 4));
+    const m = Number(digits.slice(4, 6));
+    const d = Number(digits.slice(6, 8));
+    return toValidYmd(y, m, d);
+  }
+
+  if (/^\d{6}$/.test(digits)) {
+    const yy = Number(digits.slice(0, 2));
+    const y = yy >= 30 ? 1900 + yy : 2000 + yy;
+    const m = Number(digits.slice(2, 4));
+    const d = Number(digits.slice(4, 6));
+    return toValidYmd(y, m, d);
+  }
+
+  return null;
+}
+
+function formatYmd(input: string) {
+  const digits = input.replace(/\D/g, '').slice(0, 8);
+  if (digits.length <= 4) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+  return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+}
+
+function sanitizeFileName(input: string) {
+  return input.replace(/[\\/:*?"<>|#\u0000-\u001F]/g, '_').trim() || 'document';
 }
 
 export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const { id } = useParams();
 
   const [contract, setContract] = useState<Contract | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [originalContract, setOriginalContract] = useState<Contract | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
 
-  const formatYmd = (input: string) => {
-    const digits = input.replace(/\D/g, '').slice(0, 8);
-    if (digits.length <= 4) return digits;
-    if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
-    return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
-  };
+  const [employeeName, setEmployeeName] = useState(profile.name);
+  const [createdAt, setCreatedAt] = useState('');
+  const [contractType, setContractType] = useState(DEFAULT_CONTRACT_TYPE);
+  const [customerName, setCustomerName] = useState('');
+  const [victimOrInsured, setVictimOrInsured] = useState('');
+  const [beneficiaryName, setBeneficiaryName] = useState('');
+  const [legalRepresentativeName, setLegalRepresentativeName] = useState('');
+  const [customerGender, setCustomerGender] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
+  const [customerCategory, setCustomerCategory] = useState<'GA' | 'ì†Œê°œê±´' | 'í™˜ì' | 'ê¸°íƒ€'>('ì†Œê°œê±´');
+  const [customerDob, setCustomerDob] = useState('');
+  const [customerAddress, setCustomerAddress] = useState('');
+  const [relationToParty, setRelationToParty] = useState('');
+  const [accidentDate, setAccidentDate] = useState('');
+  const [accidentLocation, setAccidentLocation] = useState('');
+  const [accidentSummary, setAccidentSummary] = useState('');
+  const [delegation, setDelegation] = useState({
+    autoInsurance: false,
+    personalInsurance: false,
+    workersComp: false,
+    disabilityPension: false,
+    employerLiability: false,
+    schoolSafety: false,
+    other: false
+  });
+  const [delegationOtherText, setDelegationOtherText] = useState('');
+  const [upfrontFeeTenThousand, setUpfrontFeeTenThousand] = useState('');
+  const [adminFeePercent, setAdminFeePercent] = useState('');
+  const [adjusterFeePercent, setAdjusterFeePercent] = useState('');
+  const [feeNotes, setFeeNotes] = useState('');
+  const [content, setContent] = useState('');
+  const [consentPersonalInfo, setConsentPersonalInfo] = useState(true);
+  const [consentRequiredTerms, setConsentRequiredTerms] = useState(true);
+  const [signatureDataUrl, setSignatureDataUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState<'draft' | 'active' | 'on_hold' | 'closed'>('draft');
+  const [feeReceivedAt, setFeeReceivedAt] = useState('');
+  const [nextActionAt, setNextActionAt] = useState('');
+  const [closedAt, setClosedAt] = useState('');
+  const [recipientRequest, setRecipientRequest] = useState<ContractRecipientRequest | null>(null);
+  const [recipientRequestLoading, setRecipientRequestLoading] = useState(false);
+  const [recipientRequestWorking, setRecipientRequestWorking] = useState(false);
 
-  const getAccessTokenOrThrow = async () => {
-    const session = await ensureValidAccessToken();
-    if (!session) {
-      throw new Error('¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.');
+  useEffect(() => {
+    if (!id) return;
+    if (location.hash === '#materials') {
+      navigate(`/contracts/${id}/materials`, { replace: true });
+    } else if (location.hash === '#memo') {
+      navigate(`/contracts/${id}/memo`, { replace: true });
     }
-    return session;
+  }, [id, location.hash, navigate]);
+
+  useEffect(() => {
+    try {
+      const notice = sessionStorage.getItem('post_contract_notice');
+      if (notice) {
+        setMessage(notice);
+        sessionStorage.removeItem('post_contract_notice');
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const loadContract = async (preserveMessage = false) => {
+    if (!id) {
+      setError('ìœ íš¨í•˜ì§€ ì•Šì€ ê³„ì•½ì„œ IDì…ë‹ˆë‹¤.');
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    if (!preserveMessage) {
+      setMessage(null);
+    }
+    setIsEditing(false);
+
+    try {
+      const accessToken = await ensureValidAccessToken();
+      const res = await withTimeout(
+        fetch(`${workerBase}/contracts/${id}`, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        }),
+        REQUEST_TIMEOUT_MS,
+        'ê³„ì•½ì„œ ì¡°íšŒê°€ ì§€ì—°ë˜ê³  ìˆìŠµë‹ˆë‹¤.'
+      );
+
+      const payload = (await res.json().catch(() => ({}))) as { contract?: Contract; error?: string };
+      const rawMsg = payload.error || `ê³„ì•½ì„œ ì¡°íšŒ ì‹¤íŒ¨ (status=${res.status})`;
+      const msg = normalizeSessionMessage(rawMsg);
+
+      if (res.status === 401 || msg.startsWith('Invalid access token.')) {
+        clearAuthState();
+        window.location.replace(`/?logout=1&t=${Date.now()}`);
+        throw new Error('ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+      }
+      if (!res.ok || !payload.contract) throw new Error(msg);
+
+      const item = recoverContractTextMap(payload.contract) as Contract;
+      setContract(item);
+      setEmployeeName(item.employee_name || profile.name);
+      setCreatedAt(item.created_at || '');
+      setContractType(item.contract_type || DEFAULT_CONTRACT_TYPE);
+      setCustomerName(item.customer_name || '');
+      setVictimOrInsured(item.victim_or_insured || '');
+      setBeneficiaryName(item.beneficiary_name || '');
+      setLegalRepresentativeName(item.legal_representative_name || '');
+      setCustomerGender(item.customer_gender || '');
+      setCustomerPhone(item.customer_phone || '');
+      setCustomerCategory(item.customer_category || 'ì†Œê°œê±´');
+      setCustomerDob(item.customer_dob || '');
+      setCustomerAddress(item.customer_address || '');
+      setRelationToParty(item.relation_to_party || '');
+      setAccidentDate(item.accident_date || '');
+      setAccidentLocation(item.accident_location || '');
+      setAccidentSummary(item.accident_summary || '');
+      setDelegation({
+        autoInsurance: !!item.delegation_auto_insurance,
+        personalInsurance: !!item.delegation_personal_insurance,
+        workersComp: !!item.delegation_workers_comp,
+        disabilityPension: !!item.delegation_disability_pension,
+        employerLiability: !!item.delegation_employer_liability,
+        schoolSafety: !!item.delegation_school_safety,
+        other: !!item.delegation_other
+      });
+      setDelegationOtherText(item.delegation_other_text || '');
+      setUpfrontFeeTenThousand(item.upfront_fee_ten_thousand == null ? '' : String(item.upfront_fee_ten_thousand));
+      setAdminFeePercent(item.admin_fee_percent == null ? '' : String(item.admin_fee_percent));
+      setAdjusterFeePercent(item.adjuster_fee_percent == null ? '' : String(item.adjuster_fee_percent));
+      setFeeNotes(item.fee_notes || '');
+      setContent(item.content || '');
+      setConsentPersonalInfo(item.consent_personal_info == null ? true : !!item.consent_personal_info);
+      setConsentRequiredTerms(item.consent_required_terms == null ? true : !!item.consent_required_terms);
+      setSignatureDataUrl(item.signature_data_url || null);
+      setStatus(item.status || 'draft');
+      setFeeReceivedAt(item.fee_received_at || '');
+      setNextActionAt(item.next_action_at || '');
+      setClosedAt(item.closed_at || '');
+    } catch (err) {
+      setError(
+        normalizeSessionMessage(
+          err instanceof Error ? err.message : 'ê³„ì•½ì„œë¥¼ ë¶ˆëŸ¬ì˜¤ëŠ” ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.'
+        )
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    const load = async () => {
-      if (!id) return;
-      const { data, error: dbError } = await supabase.from('contracts').select('*').eq('id', id).single();
-      if (dbError) {
-        setError(dbError.message);
-      } else {
-        setContract(data as Contract);
-        setOriginalContract(data as Contract);
-      }
-      setLoading(false);
-    };
-    load();
-  }, [id]);
+    void loadContract();
+  }, [id, profile.name]);
 
-  const onSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!contract) return;
+  useEffect(() => {
+    if (loading || !window.location.hash) return;
+    const targetId = window.location.hash.slice(1);
+    const timer = window.setTimeout(() => {
+      document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+    return () => window.clearTimeout(timer);
+  }, [loading, id]);
+
+  const canEdit = profile.role === 'admin' || contract?.created_by === profile.auth_user_id;
+  const disabled = !isEditing || !canEdit;
+  const recipientLink = recipientRequest
+    ? `${window.location.origin}/recipient-requests/${recipientRequest.public_token}`
+    : '';
+
+  const loadRecipientRequest = async (silent = false) => {
+    if (!id || !canEdit) {
+      setRecipientRequest(null);
+      return;
+    }
+
+    if (!silent) {
+      setRecipientRequestLoading(true);
+    }
+
+    try {
+      const accessToken = await ensureValidAccessToken();
+      const res = await withTimeout(
+        fetch(`${workerBase}/contracts/${id}/recipient-request`, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        }),
+        REQUEST_TIMEOUT_MS,
+        'ê³ ê° ìš”ì²­ ì •ë³´ë¥¼ ë¶ˆëŸ¬ì˜¤ëŠ” ì¤‘ì…ë‹ˆë‹¤.'
+      );
+
+      const payload = (await res.json().catch(() => ({}))) as {
+        request?: ContractRecipientRequest | null;
+        error?: string;
+      };
+      const rawMsg = payload.error || `ê³ ê° ìš”ì²­ ì¡°íšŒ ì‹¤íŒ¨ (status=${res.status})`;
+      const msg = normalizeSessionMessage(rawMsg);
+
+      if (res.status === 401 || msg.startsWith('Invalid access token.')) {
+        clearAuthState();
+        window.location.replace(`/?logout=1&t=${Date.now()}`);
+        throw new Error('ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+      }
+      if (!res.ok) throw new Error(msg);
+
+      setRecipientRequest(payload.request || null);
+    } catch (err) {
+      if (!silent) {
+        setError(
+          normalizeSessionMessage(
+            err instanceof Error ? err.message : 'ê³ ê° ìš”ì²­ ì •ë³´ë¥¼ ë¶ˆëŸ¬ì˜¤ëŠ” ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.'
+          )
+        );
+      }
+    } finally {
+      if (!silent) {
+        setRecipientRequestLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!canEdit) {
+      setRecipientRequest(null);
+      return;
+    }
+
+    void loadRecipientRequest();
+  }, [id, canEdit]);
+
+  const onCreateRecipientRequest = async () => {
+    if (!id || !canEdit) return;
+
+    setRecipientRequestWorking(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      const accessToken = await ensureValidAccessToken();
+      const res = await withTimeout(
+        fetch(`${workerBase}/contracts/${id}/recipient-request`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`
+          }
+        }),
+        REQUEST_TIMEOUT_MS,
+        'ê³ ê° ë§í¬ ìƒì„±ì´ ì§€ì—°ë˜ê³  ìˆìŠµë‹ˆë‹¤.'
+      );
+
+      const payload = (await res.json().catch(() => ({}))) as {
+        request?: ContractRecipientRequest | null;
+        error?: string;
+      };
+      const rawMsg = payload.error || `ê³ ê° ë§í¬ ìƒì„± ì‹¤íŒ¨ (status=${res.status})`;
+      const msg = normalizeSessionMessage(rawMsg);
+
+      if (res.status === 401 || msg.startsWith('Invalid access token.')) {
+        clearAuthState();
+        window.location.replace(`/?logout=1&t=${Date.now()}`);
+        throw new Error('ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+      }
+      if (!res.ok || !payload.request) throw new Error(msg);
+
+      setRecipientRequest(payload.request);
+      setMessage('ê³ ê°ì´ ì‘ì„±í•  ë§í¬ë¥¼ ì¤€ë¹„í–ˆìŠµë‹ˆë‹¤.');
+    } catch (err) {
+      setError(
+        normalizeSessionMessage(err instanceof Error ? err.message : 'ê³ ê° ë§í¬ ìƒì„± ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.')
+      );
+    } finally {
+      setRecipientRequestWorking(false);
+    }
+  };
+
+  const onCopyRecipientLink = async () => {
+    if (!recipientLink) return;
+
+    const shareMessage = `ê³„ì•½ì„œ ì •ë³´ í™•ì¸ê³¼ ì„œëª…ì„ ìœ„í•´ ì•„ë˜ ë§í¬ë¥¼ ì—´ì–´ ì£¼ì„¸ìš”.\n${recipientLink}`;
+    try {
+      await navigator.clipboard.writeText(shareMessage);
+      setMessage('ê³ ê°ì—ê²Œ ë³´ë‚¼ ì•ˆë‚´ ë¬¸êµ¬ì™€ ë§í¬ë¥¼ ë³µì‚¬í–ˆìŠµë‹ˆë‹¤.');
+    } catch {
+      setError('í´ë¦½ë³´ë“œ ë³µì‚¬ì— ì‹¤íŒ¨í–ˆìŠµë‹ˆë‹¤. ë¸Œë¼ìš°ì € ê¶Œí•œì„ í™•ì¸í•´ ì£¼ì„¸ìš”.');
+    }
+  };
+
+  const onRefreshRecipientRequest = async () => {
+    setRecipientRequestLoading(true);
+    try {
+      await loadRecipientRequest(true);
+      await loadContract(true);
+      setMessage('ê³ ê° ì‘ë‹µ ìƒíƒœë¥¼ ìƒˆë¡œ ë¶ˆëŸ¬ì™”ìŠµë‹ˆë‹¤.');
+    } finally {
+      setRecipientRequestLoading(false);
+    }
+  };
+
+  const onSave = async () => {
+    if (!id || !canEdit) return;
+
     setSaving(true);
     setError(null);
     setMessage(null);
 
-    const { error: dbError } = await supabase
-      .from('contracts')
-      .update({
-        contract_type: contract.contract_type,
-        customer_name: contract.customer_name,
-        victim_or_insured: contract.victim_or_insured,
-        beneficiary_name: contract.beneficiary_name,
-        customer_gender: contract.customer_gender,
-        customer_phone: contract.customer_phone,
-        customer_dob: contract.customer_dob,
-        customer_address: contract.customer_address,
-        relation_to_party: contract.relation_to_party,
-        accident_date: contract.accident_date,
-        accident_location: contract.accident_location,
-        accident_summary: contract.accident_summary,
-        delegation_auto_insurance: contract.delegation_auto_insurance,
-        delegation_personal_insurance: contract.delegation_personal_insurance,
-        delegation_workers_comp: contract.delegation_workers_comp,
-        delegation_disability_pension: contract.delegation_disability_pension,
-        delegation_employer_liability: contract.delegation_employer_liability,
-        delegation_school_safety: contract.delegation_school_safety,
-        delegation_other: contract.delegation_other,
-        delegation_other_text: contract.delegation_other_text,
-        upfront_fee_ten_thousand: contract.upfront_fee_ten_thousand,
-        admin_fee_percent: contract.admin_fee_percent,
-        adjuster_fee_percent: contract.adjuster_fee_percent,
-        fee_notes: contract.fee_notes,
-        content: contract.content,
-        consent_personal_info: contract.consent_personal_info,
-        consent_required_terms: contract.consent_required_terms,
-        signature_data_url: contract.signature_data_url
-      })
-      .eq('id', contract.id);
+    try {
+      const normalizedCustomerDob = normalizeDateForApi(customerDob);
+      if (customerDob.trim() && !normalizedCustomerDob) {
+        throw new Error('ìƒë…„ì›”ì¼ í˜•ì‹ì´ ì˜¬ë°”ë¥´ì§€ ì•ŠìŠµë‹ˆë‹¤. YYYY-MM-DD í˜•ì‹ìœ¼ë¡œ ì…ë ¥í•´ì£¼ì„¸ìš”.');
+      }
 
-    if (dbError) {
-      setError(dbError.message);
-      setSaving(false);
-      return;
-    }
+      const normalizedAccidentDate = normalizeDateForApi(accidentDate);
+      if (accidentDate.trim() && !normalizedAccidentDate) {
+        throw new Error('ì‚¬ê³ ë°œìƒì¼ í˜•ì‹ì´ ì˜¬ë°”ë¥´ì§€ ì•ŠìŠµë‹ˆë‹¤. YYYY-MM-DD í˜•ì‹ìœ¼ë¡œ ì…ë ¥í•´ì£¼ì„¸ìš”.');
+      }
 
-    const syncResult = await onSync(contract.id, { suppressUiError: true, suppressUiSuccess: true });
-    if (!syncResult.ok) {
-      setError(null);
-      setSaving(false);
+      const accessToken = await ensureValidAccessToken();
+      const res = await withTimeout(
+        fetch(`${workerBase}/contracts/${id}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`
+          },
+          body: JSON.stringify({
+            contract_type: contractType || null,
+            customer_name: customerName,
+            victim_or_insured: victimOrInsured || null,
+            beneficiary_name: beneficiaryName || null,
+            legal_representative_name: legalRepresentativeName || null,
+            customer_gender: customerGender || null,
+            customer_phone: customerPhone || null,
+            customer_category: customerCategory || null,
+            customer_dob: normalizedCustomerDob,
+            customer_address: customerAddress || null,
+            relation_to_party: relationToParty || null,
+            accident_date: normalizedAccidentDate,
+            accident_location: accidentLocation || null,
+            accident_summary: accidentSummary || null,
+            delegation_auto_insurance: delegation.autoInsurance,
+            delegation_personal_insurance: delegation.personalInsurance,
+            delegation_workers_comp: delegation.workersComp,
+            delegation_disability_pension: delegation.disabilityPension,
+            delegation_employer_liability: delegation.employerLiability,
+            delegation_school_safety: delegation.schoolSafety,
+            delegation_other: delegation.other,
+            delegation_other_text: delegationOtherText || null,
+            upfront_fee_ten_thousand: upfrontFeeTenThousand ? Number(upfrontFeeTenThousand) : null,
+            admin_fee_percent: adminFeePercent ? Number(adminFeePercent) : null,
+            adjuster_fee_percent: adjusterFeePercent ? Number(adjusterFeePercent) : null,
+            fee_notes: feeNotes || null,
+            content: content || null,
+            consent_personal_info: consentPersonalInfo,
+            consent_required_terms: consentRequiredTerms,
+            signature_data_url: signatureDataUrl,
+            status,
+            fee_received_at: feeReceivedAt || null,
+            next_action_at: nextActionAt || null,
+            closed_at: closedAt || null,
+          })
+        }),
+        REQUEST_TIMEOUT_MS,
+        'ê³„ì•½ì„œ ì €ì¥ì´ ì§€ì—°ë˜ê³  ìˆìŠµë‹ˆë‹¤.'
+      );
+
+      const payload = (await res.json().catch(() => ({}))) as { contract?: Contract; error?: string };
+      const rawMsg = payload.error || `ê³„ì•½ì„œ ì €ì¥ ì‹¤íŒ¨ (status=${res.status})`;
+      const msg = normalizeSessionMessage(rawMsg);
+
+      if (res.status === 401 || msg.startsWith('Invalid access token.')) {
+        clearAuthState();
+        window.location.replace(`/?logout=1&t=${Date.now()}`);
+        throw new Error('ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
+      }
+      if (!res.ok) throw new Error(msg);
+
+      if (payload.contract) {
+        const updated = recoverContractTextMap(payload.contract) as Contract;
+        setContract(updated);
+        setEmployeeName(updated.employee_name || profile.name);
+        setCreatedAt(updated.created_at || createdAt);
+      }
+
       setIsEditing(false);
-      setOriginalContract(contract);
-      setMessage(syncResult.error ? `ÀúÀåÀº ¿Ï·áµÇ¾ú½À´Ï´Ù. ${syncResult.error}` : 'ÀúÀåÀº ¿Ï·áµÇ¾ú½À´Ï´Ù. PDF ÀÚµ¿ »ı¼ºÀº ½ÇÆĞÇß½À´Ï´Ù.');
-      return;
+      setMessage('ìˆ˜ì • ë‚´ìš©ì´ ì €ì¥ë˜ì—ˆìŠµë‹ˆë‹¤.');
+    } catch (err) {
+      setError(
+        normalizeSessionMessage(err instanceof Error ? err.message : 'ì €ì¥ ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.')
+      );
+    } finally {
+      setSaving(false);
     }
-
-    await onDownloadPdf({ skipSync: true });
-    setSaving(false);
-    setIsEditing(false);
-    setOriginalContract(contract);
-    setMessage('ÀúÀå ¹× PDF ´Ù¿î·Îµå°¡ ¿Ï·áµÇ¾ú½À´Ï´Ù.');
   };
 
-  const onSync = async (
-    contractId?: string,
-    options?: { suppressUiError?: boolean; suppressUiSuccess?: boolean }
-  ): Promise<{ ok: boolean; driveFileId?: string; error?: string }> => {
-    const targetId = contractId || contract?.id;
-    if (!targetId || !workerBase) return { ok: false, error: 'contract_id not found' };
+  const onDownloadPdf = async () => {
+    if (!id) return;
 
-    setSyncing(true);
+    setDownloading(true);
     setError(null);
+    setMessage(null);
 
-    let accessToken = '';
     try {
-      accessToken = await getAccessTokenOrThrow();
+      const accessToken = await ensureValidAccessToken();
+
+      const downloadOnce = async () =>
+        withTimeout(
+          fetch(`${workerBase}/contracts/${id}/pdf`, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+          }),
+          PDF_SYNC_TIMEOUT_MS,
+          'PDF ë‹¤ìš´ë¡œë“œ ìš”ì²­ì´ ì§€ì—°ë˜ê³  ìˆìŠµë‹ˆë‹¤.'
+        );
+
+      let res = await downloadOnce();
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(normalizeSessionMessage(payload.error || `PDF ë‹¤ìš´ë¡œë“œ ì‹¤íŒ¨ (status=${res.status})`));
+      }
+
+      const blob = await res.blob();
+      const dateText = (createdAt || new Date().toISOString()).slice(0, 10);
+      const filename = `${sanitizeFileName(customerName || 'ê³ ê°ëª…')}_${dateText}.pdf`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setMessage(`PDF ë‹¤ìš´ë¡œë“œê°€ ì™„ë£Œë˜ì—ˆìŠµë‹ˆë‹¤.`);
     } catch (err) {
-      setMessage(null);
-      if (!options?.suppressUiError) {
-        setError(err instanceof Error ? err.message : '¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.');
-      }
-      if (isSessionExpiredError(err)) {
-        clearAuthState();
-        setTimeout(() => {
-          navigate('/');
-        }, 200);
-      }
-      setSyncing(false);
-      return { ok: false, error: err instanceof Error ? err.message : 'token error' };
-    }
-
-    const callSync = async (token: string) =>
-      fetch(`${workerBase}/integrations/google/sync`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ contract_id: targetId })
-      });
-
-    let res: Response;
-    try {
-      res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, 'µ¿±âÈ­ ¿äÃ»ÀÌ Áö¿¬µÇ¾ú½À´Ï´Ù.');
-    } catch (err) {
-      if (!options?.suppressUiError) {
-        setError(toUserFriendlyError(err, 'µ¿±âÈ­ ½ÇÆĞ'));
-      }
-      setMessage(null);
-      if (isSessionExpiredError(err)) {
-        clearAuthState();
-        setTimeout(() => {
-          navigate('/');
-        }, 200);
-      }
-      setSyncing(false);
-      return { ok: false, error: toUserFriendlyError(err, 'µ¿±âÈ­ ½ÇÆĞ') };
-    }
-
-    if (res.status === 401) {
-      try {
-        accessToken = await getAccessTokenOrThrow();
-        res = await withTimeout(callSync(accessToken), SYNC_TIMEOUT_MS, 'µ¿±âÈ­ ¿äÃ»ÀÌ Áö¿¬µÇ¾ú½À´Ï´Ù.');
-      } catch {
-        // handled by res error below
-      }
-    }
-
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      if (!options?.suppressUiError) {
-        setError(toUserFriendlyError(payload.error, 'µ¿±âÈ­ ½ÇÆĞ'));
-      }
-      setMessage(null);
-      if (isSessionExpiredError(payload.error)) {
-        clearAuthState();
-        setTimeout(() => {
-          navigate('/');
-        }, 200);
-      }
-      setSyncing(false);
-      return { ok: false, error: toUserFriendlyError(payload.error, 'sync failed') };
-    } else {
-      if (!options?.suppressUiSuccess) {
-        setMessage('PDF »ı¼º ¹× ÀúÀåÀÌ ¿Ï·áµÇ¾ú½À´Ï´Ù.');
-      }
-      const { data } = await supabase.from('contracts').select('*').eq('id', targetId).single();
-      setContract(data as Contract);
-      setOriginalContract(data as Contract);
-      setSyncing(false);
-      return {
-        ok: true,
-        driveFileId:
-          typeof payload.drive_file_id === 'string' && payload.drive_file_id
-            ? payload.drive_file_id
-            : (data as Contract | null)?.drive_file_id || undefined
-      };
+      setError(
+        normalizeSessionMessage(
+          err instanceof Error ? err.message : 'PDF ë‹¤ìš´ë¡œë“œ ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.'
+        )
+      );
+    } finally {
+      setDownloading(false);
     }
   };
 
   const onDelete = async () => {
-    if (!contract) return;
-    if (!confirm('Á¤¸» »èÁ¦ÇÏ½Ã°Ú½À´Ï±î?')) return;
+    if (!id || !canEdit) return;
+    if (!window.confirm('ì´ ê³„ì•½ì„œë¥¼ ì‚­ì œí• ê¹Œìš”?')) return;
 
-    const { error: dbError } = await supabase.from('contracts').delete().eq('id', contract.id);
-    if (dbError) {
-      setError(dbError.message);
-      return;
-    }
-    navigate('/contracts');
-  };
-
-  const onDownloadPdf = async (options?: { skipSync?: boolean }) => {
-    if (!contract?.id) return;
+    setDeleting(true);
     setError(null);
-    setMessage('ÃÖ½Å °è¾à¼­ PDF¸¦ ÁØºñ ÁßÀÔ´Ï´Ù...');
+    setMessage(null);
 
-    let accessToken = '';
     try {
-      accessToken = await getAccessTokenOrThrow();
-    } catch (err) {
-      setMessage(null);
-      setError(err instanceof Error ? err.message : '¼¼¼ÇÀÌ ¸¸·áµÇ¾ú½À´Ï´Ù. ´Ù½Ã ·Î±×ÀÎ ÇØÁÖ¼¼¿ä.');
-      if (isSessionExpiredError(err)) {
+      const accessToken = await ensureValidAccessToken();
+      const res = await withTimeout(
+        fetch(`${workerBase}/contracts/${id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${accessToken}` }
+        }),
+        REQUEST_TIMEOUT_MS,
+        'ì‚­ì œ ìš”ì²­ì´ ì§€ì—°ë˜ê³  ìˆìŠµë‹ˆë‹¤.'
+      );
+
+      const payload = (await res.json().catch(() => ({}))) as { error?: string };
+      const rawMsg = payload.error || `ì‚­ì œ ì‹¤íŒ¨ (status=${res.status})`;
+      const msg = normalizeSessionMessage(rawMsg);
+
+      if (res.status === 401 || msg.startsWith('Invalid access token.')) {
         clearAuthState();
-        setTimeout(() => {
-          navigate('/');
-        }, 200);
+        window.location.replace(`/?logout=1&t=${Date.now()}`);
+        throw new Error('ì„¸ì…˜ì´ ë§Œë£Œë˜ì—ˆìŠµë‹ˆë‹¤. ë‹¤ì‹œ ë¡œê·¸ì¸ í•´ì£¼ì„¸ìš”.');
       }
-      return;
-    }
+      if (!res.ok) throw new Error(msg);
 
-    if (!options?.skipSync) {
-      const syncResult = await onSync(contract.id, { suppressUiSuccess: true });
-      if (!syncResult.ok) {
-        setMessage(null);
-        if (isSessionExpiredError(syncResult.error)) {
-          clearAuthState();
-          setTimeout(() => {
-            navigate('/');
-          }, 200);
-        }
-        return;
-      }
-    }
-
-    const fetchPdf = async (token: string) =>
-      fetch(`${workerBase}/contracts/${contract.id}/pdf`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
-
-    let res: Response;
-    try {
-      res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF ´Ù¿î·Îµå°¡ Áö¿¬µÇ¾ú½À´Ï´Ù.');
+      navigate('/contracts');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'PDF ´Ù¿î·Îµå°¡ Áö¿¬µÇ¾ú½À´Ï´Ù.');
-      setMessage(null);
-      return;
+      setError(
+        normalizeSessionMessage(err instanceof Error ? err.message : 'ì‚­ì œ ì¤‘ ì˜¤ë¥˜ê°€ ë°œìƒí–ˆìŠµë‹ˆë‹¤.')
+      );
+    } finally {
+      setDeleting(false);
     }
-
-    if (res.status === 401) {
-      try {
-        accessToken = await getAccessTokenOrThrow();
-        res = await withTimeout(fetchPdf(accessToken), 30000, 'PDF ´Ù¿î·Îµå°¡ Áö¿¬µÇ¾ú½À´Ï´Ù.');
-      } catch {
-        // handled by response error below
-      }
-    }
-
-    if (!res.ok) {
-      const payload = await res.json().catch(() => ({}));
-      setError(toUserFriendlyError(payload.error, 'PDF ´Ù¿î·Îµå¿¡ ½ÇÆĞÇß½À´Ï´Ù.'));
-      setMessage(null);
-      if (isSessionExpiredError(payload.error)) {
-        clearAuthState();
-        setTimeout(() => {
-          navigate('/');
-        }, 200);
-      }
-      return;
-    }
-
-    const blob = await res.blob();
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `contract_${contract.customer_name || contract.id}.pdf`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.URL.revokeObjectURL(url);
-    setMessage('PDF ´Ù¿î·Îµå°¡ ¿Ï·áµÇ¾ú½À´Ï´Ù.');
   };
 
-  if (loading) return <p className="text-sm text-slate-500">ºÒ·¯¿À´Â Áß...</p>;
-  if (!contract) return <p className="text-sm text-red-600">°è¾à¼­¸¦ Ã£À» ¼ö ¾ø½À´Ï´Ù.</p>;
-
-  const canEdit = profile.role === 'admin' || contract.created_by === profile.auth_user_id;
-  const canEditNow = canEdit && isEditing;
+  if (loading) return <p className="text-sm text-slate-500">ë¶ˆëŸ¬ì˜¤ëŠ” ì¤‘...</p>;
+  if (!contract) return <p className="text-sm text-red-600">{error || 'ê³„ì•½ì„œë¥¼ ë¶ˆëŸ¬ì˜¤ì§€ ëª»í–ˆìŠµë‹ˆë‹¤.'}</p>;
 
   return (
-    <form className="space-y-4" onSubmit={onSave}>
-      <Card title="°è¾à »ó¼¼">
+    <div className="space-y-4">
+      <Card title="(1) ê³„ì•½ ê¸°ë³¸ì •ë³´">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <Label text="Á÷¿ø¸í" />
-            <TextInput value={contract.employee_name} readOnly />
+            <Label text="ì§ì›ëª…" />
+            <TextInput value={employeeName} readOnly />
           </div>
           <div>
-            <Label text="°è¾à À¯Çü" />
+            <Label text="ê³„ì•½ ìœ í˜•" />
             <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3">
               {CONTRACT_TYPE_OPTIONS.map((option) => (
                 <label key={option} className="flex items-center gap-2 text-sm text-slate-700">
@@ -386,51 +601,66 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
                     type="radio"
                     name="contractType"
                     value={option}
-                    checked={(contract.contract_type || '') === option}
-                    onChange={(e) => setContract({ ...contract, contract_type: e.target.value })}
-                    disabled={!canEditNow}
+                    checked={contractType === option}
+                    onChange={(e) => setContractType(e.target.value)}
+                    disabled={disabled}
                   />
                   {option}
                 </label>
               ))}
             </div>
           </div>
+        </div>
+      </Card>
+
+      <Card title="(2) ê³ ê°ì •ë³´">
+        <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <Label text="°í°´¸í" />
-            <TextInput
-              value={contract.customer_name}
-              onChange={(e) => setContract({ ...contract, customer_name: e.target.value })}
-              disabled={!canEditNow}
-            />
+            <Label text="ê³ ê°ëª…" />
+            <TextInput value={customerName} onChange={(e) => setCustomerName(e.target.value)} disabled={disabled} required />
           </div>
           <div>
-            <Label text="ÇÇÇØÀÚ/ÇÇº¸ÇèÀÚ" />
+            <Label text="í”¼í•´ì/í”¼ë³´í—˜ì" />
             <TextInput
-              value={contract.victim_or_insured || ''}
-              onChange={(e) => setContract({ ...contract, victim_or_insured: e.target.value })}
-              disabled={!canEditNow}
+              value={victimOrInsured}
+              onChange={(e) => setVictimOrInsured(e.target.value)}
+              disabled={disabled}
+              placeholder="ì—†ì„ ì‹œ ë¹ˆì¹¸ìœ¼ë¡œ ë‘ì„¸ìš”"
             />
+            <p className="mt-1 text-xs text-slate-400">ì—†ì„ ì‹œ ë¹ˆì¹¸ìœ¼ë¡œ ë‘ì„¸ìš”</p>
           </div>
           <div>
-            <Label text="¼öÀÍÀÚ ÀÌ¸§" />
+            <Label text="ìˆ˜ìµì ì´ë¦„" />
             <TextInput
-              value={contract.beneficiary_name || ''}
-              onChange={(e) => setContract({ ...contract, beneficiary_name: e.target.value })}
-              disabled={!canEditNow}
+              value={beneficiaryName}
+              onChange={(e) => setBeneficiaryName(e.target.value)}
+              disabled={disabled}
+              placeholder="ì—†ì„ ì‹œ ë¹ˆì¹¸ìœ¼ë¡œ ë‘ì„¸ìš”"
             />
+            <p className="mt-1 text-xs text-slate-400">ì—†ì„ ì‹œ ë¹ˆì¹¸ìœ¼ë¡œ ë‘ì„¸ìš”</p>
           </div>
           <div>
-            <Label text="¼ºº°" />
+            <Label text="ë²•ì •ëŒ€ë¦¬ì¸" />
+            <TextInput
+              value={legalRepresentativeName}
+              onChange={(e) => setLegalRepresentativeName(e.target.value)}
+              disabled={disabled}
+              placeholder="ì—†ì„ ì‹œ ë¹ˆì¹¸ìœ¼ë¡œ ë‘ì„¸ìš”"
+            />
+            <p className="mt-1 text-xs text-slate-400">ì—†ì„ ì‹œ ë¹ˆì¹¸ìœ¼ë¡œ ë‘ì„¸ìš”</p>
+          </div>
+          <div>
+            <Label text="ì„±ë³„" />
             <div className="flex gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
-              {['³²¼º', '¿©¼º'].map((gender) => (
+              {['ë‚¨ì„±', 'ì—¬ì„±'].map((gender) => (
                 <label key={gender} className="flex items-center gap-2 text-slate-700">
                   <input
                     type="radio"
                     name="customerGender"
                     value={gender}
-                    checked={(contract.customer_gender || '') === gender}
-                    onChange={(e) => setContract({ ...contract, customer_gender: e.target.value })}
-                    disabled={!canEditNow}
+                    checked={customerGender === gender}
+                    onChange={(e) => setCustomerGender(e.target.value)}
+                    disabled={disabled}
                   />
                   {gender}
                 </label>
@@ -438,44 +668,40 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
             </div>
           </div>
           <div>
-            <Label text="¿¬¶ôÃ³" />
-            <TextInput
-              value={contract.customer_phone || ''}
-              onChange={(e) => setContract({ ...contract, customer_phone: e.target.value })}
-              disabled={!canEditNow}
-            />
+            <Label text="ì—°ë½ì²˜" />
+            <TextInput value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} disabled={disabled} />
           </div>
           <div>
-            <Label text="»ı³â¿ùÀÏ" />
+            <Label text="ê³ ê° êµ¬ë¶„" />
+            <select value={customerCategory} onChange={(e) => setCustomerCategory(e.target.value as 'GA' | 'ì†Œê°œê±´' | 'í™˜ì' | 'ê¸°íƒ€')} disabled={disabled} className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
+              <option value="GA">GA</option><option value="ì†Œê°œê±´">ì†Œê°œê±´</option><option value="í™˜ì">í™˜ì</option><option value="ê¸°íƒ€">ê¸°íƒ€</option>
+            </select>
+          </div>
+          <div>
+            <Label text="ìƒë…„ì›”ì¼" />
             <TextInput
               type="text"
               inputMode="numeric"
-              pattern="\d{4}-\d{2}-\d{2}"
               maxLength={10}
-              value={contract.customer_dob || ''}
-              onChange={(e) =>
-                setContract({ ...contract, customer_dob: formatYmd(e.target.value) })
-              }
-              disabled={!canEditNow}
+              value={customerDob}
+              onChange={(e) => setCustomerDob(formatYmd(e.target.value))}
+              disabled={disabled}
+              placeholder="ì˜ˆ: 1992-08-12"
             />
           </div>
           <div className="sm:col-span-2">
-            <Label text="ÁÖ¼Ò" />
-            <TextInput
-              value={contract.customer_address || ''}
-              onChange={(e) => setContract({ ...contract, customer_address: e.target.value })}
-              disabled={!canEditNow}
-            />
+            <Label text="ì£¼ì†Œ" />
+            <TextInput value={customerAddress} onChange={(e) => setCustomerAddress(e.target.value)} disabled={disabled} />
           </div>
           <div className="sm:col-span-2">
-            <Label text="»ç°í ´ç»çÀÚ¿ÍÀÇ °ü°è" />
+            <Label text="ì‚¬ê³  ë‹¹ì‚¬ìì™€ì˜ ê´€ê³„" />
             <select
-              value={contract.relation_to_party || ''}
-              onChange={(e) => setContract({ ...contract, relation_to_party: e.target.value })}
-              disabled={!canEditNow}
+              value={relationToParty}
+              onChange={(e) => setRelationToParty(e.target.value)}
+              disabled={disabled}
               className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm"
             >
-              <option value="">¼±ÅÃÇÏ¼¼¿ä</option>
+              <option value="">ì„ íƒí•˜ì„¸ìš”</option>
               {RELATION_OPTIONS.map((option) => (
                 <option key={option} value={option}>
                   {option}
@@ -486,51 +712,40 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
         </div>
       </Card>
 
-      <Card title="»ç°í ±âº»Á¤º¸">
+      <Card title="(3) ì‚¬ê³  ê¸°ë³¸ì •ë³´">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <Label text="»ç°í¹ß»ıÀÏ" />
+            <Label text="ì‚¬ê³ ë°œìƒì¼" />
             <TextInput
               type="text"
               inputMode="numeric"
-              pattern="\d{4}-\d{2}-\d{2}"
               maxLength={10}
-              value={contract.accident_date || ''}
-              placeholder="¿¹: 1992-08-12"
-              onChange={(e) =>
-                setContract({ ...contract, accident_date: formatYmd(e.target.value) })
-              }
-              disabled={!canEditNow}
+              value={accidentDate}
+              onChange={(e) => setAccidentDate(formatYmd(e.target.value))}
+              disabled={disabled}
+              placeholder="ì˜ˆ: 1992-08-12"
             />
           </div>
           <div>
-            <Label text="»ç°í¹ß»ıÀå¼Ò" />
-            <TextInput
-              value={contract.accident_location || ''}
-              onChange={(e) => setContract({ ...contract, accident_location: e.target.value })}
-              disabled={!canEditNow}
-            />
+            <Label text="ì‚¬ê³ ë°œìƒì¥ì†Œ" />
+            <TextInput value={accidentLocation} onChange={(e) => setAccidentLocation(e.target.value)} disabled={disabled} />
           </div>
           <div className="sm:col-span-2">
-            <Label text="»ç°íÀÇ °£´ÜÇÑ °³¿ä" />
-            <TextArea
-              value={contract.accident_summary || ''}
-              onChange={(e) => setContract({ ...contract, accident_summary: e.target.value })}
-              disabled={!canEditNow}
-            />
+            <Label text="ì‚¬ê³ ì˜ ê°„ë‹¨í•œ ê°œìš”" />
+            <TextArea value={accidentSummary} onChange={(e) => setAccidentSummary(e.target.value)} disabled={disabled} />
           </div>
         </div>
       </Card>
 
-      <Card title="°ü·Ã À§ÀÓ Ã¼Å©¸®½ºÆ®">
+      <Card title="(4) ê´€ë ¨ ìœ„ì„ ì²´í¬ë¦¬ìŠ¤íŠ¸">
         <div className="grid gap-3 sm:grid-cols-2">
           {DELEGATION_OPTIONS.map((option) => (
             <label key={option.key} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700">
               <input
                 type="checkbox"
-                checked={contract[option.key]}
-                onChange={(e) => setContract({ ...contract, [option.key]: e.target.checked })}
-                disabled={!canEditNow}
+                checked={delegation[option.key]}
+                onChange={(e) => setDelegation((prev) => ({ ...prev, [option.key]: e.target.checked }))}
+                disabled={disabled}
                 className="h-4 w-4 rounded border-slate-300"
               />
               {option.label}
@@ -538,172 +753,178 @@ export function ContractDetailPage({ profile }: { profile: EmployeeProfile }) {
           ))}
         </div>
         <div className="mt-3">
-          <Label text="±âÅ¸ ³»¿ë" />
-          <TextInput
-            value={contract.delegation_other_text || ''}
-            onChange={(e) => setContract({ ...contract, delegation_other_text: e.target.value })}
-            disabled={!canEditNow}
-          />
+          <Label text="ê¸°íƒ€ ë‚´ìš©" />
+          <TextInput value={delegationOtherText} onChange={(e) => setDelegationOtherText(e.target.value)} disabled={disabled} />
         </div>
       </Card>
 
-      <Card title="º¸¼ö °ü·Ã Ç×¸ñ (ºÎ°¡¼¼ º°µµ)">
+      <Card title="(5) ë³´ìˆ˜ ê´€ë ¨ í•­ëª© (ë¶€ê°€ì„¸ ë³„ë„)">
         <div className="grid gap-4 sm:grid-cols-3">
           <div>
-            <Label text="Âø¼ö±İ (¸¸¿ø)" />
+            <Label text="ì°©ìˆ˜ê¸ˆ (ë§Œì›)" />
             <TextInput
               type="number"
               min={0}
               step={1}
-              value={contract.upfront_fee_ten_thousand ?? ''}
-              onChange={(e) =>
-                setContract({
-                  ...contract,
-                  upfront_fee_ten_thousand: e.target.value === '' ? null : Number(e.target.value)
-                })
-              }
-              disabled={!canEditNow}
+              value={upfrontFeeTenThousand}
+              onChange={(e) => setUpfrontFeeTenThousand(e.target.value)}
+              disabled={disabled}
             />
           </div>
           <div>
-            <Label text="ÇàÁ¤»ç (%)" />
+            <Label text="í–‰ì •ì‚¬ (%)" />
             <TextInput
               type="number"
               min={0}
               max={100}
               step={0.01}
-              value={contract.admin_fee_percent ?? ''}
-              onChange={(e) =>
-                setContract({
-                  ...contract,
-                  admin_fee_percent: e.target.value === '' ? null : Number(e.target.value)
-                })
-              }
-              disabled={!canEditNow}
+              value={adminFeePercent}
+              onChange={(e) => setAdminFeePercent(e.target.value)}
+              disabled={disabled}
             />
           </div>
           <div>
-            <Label text="¼ÕÇØ»çÁ¤»ç (%)" />
+            <Label text="ì†í•´ì‚¬ì •ì‚¬ (%)" />
             <TextInput
               type="number"
               min={0}
               max={100}
               step={0.01}
-              value={contract.adjuster_fee_percent ?? ''}
-              onChange={(e) =>
-                setContract({
-                  ...contract,
-                  adjuster_fee_percent: e.target.value === '' ? null : Number(e.target.value)
-                })
-              }
-              disabled={!canEditNow}
+              value={adjusterFeePercent}
+              onChange={(e) => setAdjusterFeePercent(e.target.value)}
+              disabled={disabled}
             />
           </div>
         </div>
         <div className="mt-3">
-          <Label text="±âÅ¸»çÇ×" />
-          <TextArea
-            value={contract.fee_notes || ''}
-            onChange={(e) => setContract({ ...contract, fee_notes: e.target.value })}
-            disabled={!canEditNow}
-          />
+          <Label text="ê¸°íƒ€ì‚¬í•­" />
+          <TextArea value={feeNotes} onChange={(e) => setFeeNotes(e.target.value)} disabled={disabled} />
         </div>
       </Card>
 
-      <Card title="Æ¯¾à»çÇ×">
-        <Label text="Æ¯¾à»çÇ×" />
-        <TextArea
-          value={contract.content || ''}
-          onChange={(e) => setContract({ ...contract, content: e.target.value })}
-          disabled={!canEditNow}
-        />
+      <Card title="(6) ê³„ì•½ ê´€ë ¨ íŠ¹ì•½ì‚¬í•­">
+        <TextArea value={content} onChange={(e) => setContent(e.target.value)} disabled={disabled} />
       </Card>
 
-      <Card title="ÇÊ¼ö µ¿ÀÇ Ã¼Å©">
-        <label className="flex items-center gap-2 text-sm text-slate-700">
-          <input
-            type="checkbox"
-            checked={contract.consent_personal_info}
-            onChange={(e) => setContract({ ...contract, consent_personal_info: e.target.checked })}
-            disabled={!canEditNow}
-          />
-          °³ÀÎÁ¤º¸ ÀÌ¿ë¿¡ µ¿ÀÇÇÕ´Ï´Ù.
-        </label>
-        <label className="mt-2 flex items-center gap-2 text-sm text-slate-700">
-          <input
-            type="checkbox"
-            checked={contract.consent_required_terms}
-            onChange={(e) => setContract({ ...contract, consent_required_terms: e.target.checked })}
-            disabled={!canEditNow}
-          />
-          °è¾à°ú °ü·ÃµÈ ÇÊ¼ö»çÇ×¿¡ µ¿ÀÇÇÕ´Ï´Ù.
-        </label>
+      <Card title="(7) í•„ìˆ˜ ë™ì˜ ì²´í¬">
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={consentPersonalInfo}
+              onChange={(e) => setConsentPersonalInfo(e.target.checked)}
+              disabled={disabled}
+              className="h-4 w-4 rounded border-slate-300"
+            />
+            ê°œì¸ì •ë³´ ì´ìš©ì— ë™ì˜í•©ë‹ˆë‹¤.
+          </label>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={consentRequiredTerms}
+              onChange={(e) => setConsentRequiredTerms(e.target.checked)}
+              disabled={disabled}
+              className="h-4 w-4 rounded border-slate-300"
+            />
+            ê³„ì•½ê³¼ ê´€ë ¨ëœ í•„ìˆ˜ì‚¬í•­ì— ë™ì˜í•©ë‹ˆë‹¤.
+          </label>
+        </div>
       </Card>
 
-      <Card title="¼­¸í">
-        <SignaturePad
-          value={contract.signature_data_url}
-          onChange={(value) => setContract({ ...contract, signature_data_url: value })}
-          disabled={!canEditNow}
-        />
+      <Card title="(8) ì„œëª…">
+        <SignaturePad value={signatureDataUrl} onChange={setSignatureDataUrl} disabled={disabled} />
       </Card>
 
-      {profile.role === 'admin' && (
-        <Card title="Google µ¿±âÈ­ °á°ú">
-          <p className="text-sm text-slate-600">Drive ÆÄÀÏ ID: {contract.drive_file_id || '¾øÀ½'}</p>
-          <p className="text-sm text-slate-600">Sheet Row: {contract.sheet_row_id || '¾øÀ½'}</p>
-          {contract.drive_file_id && (
-            <a
-              className="mt-2 inline-block text-sm text-brand-700 underline"
-              href={`https://drive.google.com/file/d/${contract.drive_file_id}/view`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Drive ÆÄÀÏ ¿­±â
-            </a>
-          )}
+      {canEdit && (
+        <Card
+          title="(9) ê³ ê° ë§í¬ ìˆ˜ì§‘"
+          subtitle="ê³„ì•½ìì—ê²Œ ë§í¬ë¥¼ ë³´ë‚´ ì„±ëª…, ìƒë…„ì›”ì¼, ë™ì˜ ì—¬ë¶€, ì„œëª…ì„ ì§ì ‘ ë°›ìœ¼ë©´ í˜„ì¬ ê³„ì•½ì„œì— ë³‘í•©ë©ë‹ˆë‹¤."
+        >
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span
+                className={`rounded-full px-3 py-1 font-medium ${
+                  recipientRequest?.status === 'completed'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : recipientRequest
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                {recipientRequest?.status === 'completed'
+                  ? 'ê³ ê° ì œì¶œ ì™„ë£Œ'
+                  : recipientRequest
+                    ? 'ë§í¬ ìƒì„±ë¨'
+                    : 'ë§í¬ ë¯¸ìƒì„±'}
+              </span>
+              {recipientRequest?.submitted_at && (
+                <span className="text-slate-500">
+                  ì œì¶œ ì‹œê°: {new Date(recipientRequest.submitted_at).toLocaleString()}
+                </span>
+              )}
+            </div>
+
+            {recipientLink ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+                <p className="font-medium text-slate-800">ê³ ê° ì…ë ¥ ë§í¬</p>
+                <p className="mt-1 break-all">{recipientLink}</p>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">ì•„ì§ ìƒì„±ëœ ê³ ê° ì…ë ¥ ë§í¬ê°€ ì—†ìŠµë‹ˆë‹¤.</p>
+            )}
+
+            {recipientRequest?.status === 'completed' && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                ê³ ê°ì´ ì§ì ‘ ì…ë ¥í•œ ì •ë³´ê°€ ê³„ì•½ì„œì— ë°˜ì˜ë˜ì—ˆìŠµë‹ˆë‹¤. í•„ìš”í•˜ë©´ ì•„ë˜ ìƒˆë¡œê³ ì¹¨ìœ¼ë¡œ ìµœì‹  ìƒíƒœë¥¼ ë‹¤ì‹œ ë¶ˆëŸ¬ì˜¤ì„¸ìš”.
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <PrimaryButton
+                type="button"
+                onClick={onCreateRecipientRequest}
+                loading={recipientRequestWorking}
+                disabled={saving || downloading || deleting}
+              >
+                {recipientRequest ? 'ë§í¬ ì¬ë°œê¸‰' : 'ë§í¬ ìƒì„±'}
+              </PrimaryButton>
+              <GhostButton
+                type="button"
+                onClick={onCopyRecipientLink}
+                disabled={!recipientLink || recipientRequestWorking}
+              >
+                ë§í¬ ë³µì‚¬
+              </GhostButton>
+              <GhostButton
+                type="button"
+                onClick={onRefreshRecipientRequest}
+                disabled={recipientRequestLoading || recipientRequestWorking}
+              >
+                {recipientRequestLoading ? 'ìƒˆë¡œê³ ì¹¨ ì¤‘...' : 'ì‘ë‹µ ìƒˆë¡œê³ ì¹¨'}
+              </GhostButton>
+            </div>
+          </div>
         </Card>
       )}
 
       {error && <p className="text-sm text-red-600">{error}</p>}
-      {message && <p className="text-sm text-green-700">{message}</p>}
+      {message && <p className="text-sm text-emerald-700">{message}</p>}
 
-      <div className="no-print flex flex-wrap gap-2">
-        {canEditNow && (
-          <PrimaryButton type="submit" loading={saving}>
-            ÀúÀå
+      <div className="flex flex-wrap gap-2">
+        {canEdit && (
+          <PrimaryButton type="button" onClick={isEditing ? onSave : () => setIsEditing(true)} loading={saving}>
+            {isEditing ? 'ìˆ˜ì • ì €ì¥' : 'ìˆ˜ì •'}
           </PrimaryButton>
         )}
-        {canEdit && !canEditNow && (
-          <GhostButton type="button" onClick={() => setIsEditing(true)}>
-            ¼öÁ¤
-          </GhostButton>
-        )}
-        {canEditNow && (
-          <GhostButton
-            type="button"
-            onClick={() => {
-              if (originalContract) setContract(originalContract);
-              setIsEditing(false);
-            }}
-          >
-            Ãë¼Ò
-          </GhostButton>
-        )}
-        <GhostButton type="button" onClick={() => void onDownloadPdf()}>
-          °è¾à¼­ PDF ´Ù¿î·Îµå
+        <GhostButton type="button" onClick={onDownloadPdf} disabled={downloading || saving || deleting}>
+          {downloading ? 'PDF ë‹¤ìš´ë¡œë“œ ì¤‘...' : 'PDF ë‹¤ìš´ë¡œë“œ'}
         </GhostButton>
-        {profile.role === 'admin' && (
-          <GhostButton type="button" onClick={() => onSync()} disabled={syncing}>
-            {syncing ? 'µ¿±âÈ­ Áß...' : 'Google Àçµ¿±âÈ­'}
-          </GhostButton>
-        )}
         {canEdit && (
-          <GhostButton type="button" onClick={onDelete}>
-            »èÁ¦
+          <GhostButton type="button" onClick={onDelete} disabled={deleting || saving || downloading} className="border-red-200 text-red-700 hover:bg-red-50">
+            {deleting ? 'ì‚­ì œ ì¤‘...' : 'ì‚­ì œ'}
           </GhostButton>
         )}
       </div>
-    </form>
+    </div>
   );
 }

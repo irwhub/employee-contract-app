@@ -9,13 +9,13 @@ export function Label({ text }: { text: string }) {
 }
 
 export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
-  const { lang = 'ko-KR', style, ...rest } = props;
+  const { lang = 'ko-KR', style, className, ...rest } = props;
   return (
     <input
       {...rest}
       lang={lang}
       style={{ imeMode: 'active', ...style }}
-      className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+      className={`w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100 ${className ?? ''}`}
     />
   );
 }
@@ -46,10 +46,11 @@ export function PrimaryButton(props: ButtonHTMLAttributes<HTMLButtonElement> & {
 }
 
 export function GhostButton(props: ButtonHTMLAttributes<HTMLButtonElement>) {
+  const { className, ...rest } = props;
   return (
     <button
-      {...props}
-      className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+      {...rest}
+      className={`rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 ${className ?? ''}`}
     />
   );
 }

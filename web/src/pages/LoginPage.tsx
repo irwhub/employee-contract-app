@@ -1,7 +1,11 @@
 ﻿import { useState } from 'react';
 import { Card } from '../components/Card';
 import { Label, PrimaryButton, TextInput } from '../components/FormControls';
-import { setFallbackFromSessionResult } from '../lib/session';
+import {
+  clearAuthState,
+  setFallbackFromSessionResult,
+  touchSessionActivity
+} from '../lib/session';
 
 const workerBase = (import.meta.env.VITE_WORKER_URL || '/api').replace(/\/$/, '');
 
@@ -19,13 +23,31 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
 
   const normalizeDobInput = (input: string) => input.replace(/[^\d-]/g, '').slice(0, 10);
 
-  const onSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const isDobFormat = (value: string) => /^(?:\d{6}|\d{8}|\d{4}-\d{2}-\d{2})$/.test(value);
+  const isPinValid = (value: string) => /^\d{4}$/.test(value);
+
+  const onSubmit = async () => {
+    clearAuthState();
     const cleanName = name.trim();
     const cleanDob = dob.trim();
     const cleanPin = pin.trim();
     setLoading(true);
     setError(null);
+    if (!cleanName) {
+      setLoading(false);
+      setError('이름을 입력해주세요.');
+      return;
+    }
+    if (!isDobFormat(cleanDob)) {
+      setLoading(false);
+      setError('생년월일은 YYMMDD, YYYYMMDD, YYYY-MM-DD 형식으로 입력해주세요.');
+      return;
+    }
+    if (!isPinValid(cleanPin)) {
+      setLoading(false);
+      setError('PIN은 4자리 숫자만 입력해주세요.');
+      return;
+    }
 
     try {
       const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: number) => {
@@ -76,6 +98,7 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
       };
 
       const { sessionSaved, message } = await setFallbackFromSessionResult(session);
+      touchSessionActivity();
       if (!sessionSaved) {
         setNotice(message || '세션 저장이 지연되었습니다. 로컬 동기 모드로 로그인됩니다.');
       }
@@ -112,11 +135,11 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-brand-50 to-slate-100 px-4">
       <div className="w-full max-w-md">
         <div className="mb-6 text-center">
-          <h1 className="text-2xl font-bold text-slate-900">이로운 손해사정 행정사 계약서 작성</h1>
+          <h1 className="break-keep text-xl font-bold leading-8 text-slate-900 sm:text-2xl">이로운 손해사정 행정사 계약서 작성</h1>
           <p className="mt-2 text-sm text-slate-500">이름, 생년월일, PIN으로 로그인하세요.</p>
         </div>
         <Card>
-          <form className="space-y-4" onSubmit={onSubmit}>
+          <div className="space-y-4">
             <div>
               <Label text="직원 이름" />
               <TextInput
@@ -126,39 +149,62 @@ export function LoginPage({ onLoginDone }: LoginPageProps) {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="홍길동"
-                required
+                required={false}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void onSubmit();
+                  }
+                }}
               />
             </div>
             <div>
               <Label text="생년월일 (YYMMDD)" />
               <TextInput
                 type="text"
-                inputMode="text"
-                pattern="(\d{6}|\d{8}|\d{4}-\d{2}-\d{2})"
+                inputMode="numeric"
                 value={dob}
                 maxLength={10}
                 placeholder="예: 920812"
                 onChange={(e) => setDob(normalizeDobInput(e.target.value))}
-                required
+                required={false}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void onSubmit();
+                  }
+                }}
               />
             </div>
             <div>
               <Label text="PIN (4자리)" />
               <TextInput
                 type="password"
-                pattern="[0-9]{4}"
                 value={pin}
                 maxLength={4}
+                inputMode="numeric"
                 onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
-                required
+                required={false}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void onSubmit();
+                  }
+                }}
               />
             </div>
             {error && <p className="text-sm text-red-600">{error}</p>}
             {notice && <p className="text-sm text-amber-700">{notice}</p>}
-            <PrimaryButton type="submit" loading={loading}>
+            <PrimaryButton
+              type="button"
+              loading={loading}
+              onClick={() => {
+                void onSubmit();
+              }}
+            >
               로그인
             </PrimaryButton>
-          </form>
+          </div>
         </Card>
       </div>
     </div>
